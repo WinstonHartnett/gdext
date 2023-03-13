@@ -325,7 +325,7 @@ impl<T: GodotClass> Gd<T> {
     }
 
     /// Returns `Ok(cast_obj)` on success, `Err(self)` on error
-    fn owned_cast<U>(self) -> Result<Gd<U>, Self>
+    pub fn owned_cast<U>(self) -> Result<Gd<U>, Self>
     where
         U: GodotClass,
     {
@@ -347,9 +347,9 @@ impl<T: GodotClass> Gd<T> {
         }
     }
 
-    // Note: does not transfer ownership and is thus unsafe. Also operates on shared ref.
-    // Either the parameter or the return value *must* be forgotten (since reference counts are not updated).
-    unsafe fn ffi_cast<U>(&self) -> Option<Gd<U>>
+    /// Cast this shared reference *without* transferring ownership. Either the parameter or the return value
+    /// *must* be forgotten (since reference counts are not updated).
+    pub unsafe fn ffi_cast<U>(&self) -> Option<Gd<U>>
     where
         U: GodotClass,
     {
