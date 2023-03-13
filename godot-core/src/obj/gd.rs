@@ -8,6 +8,7 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
+use std::sync::atomic;
 
 use godot_ffi as sys;
 use godot_ffi::VariantType;
@@ -56,7 +57,7 @@ pub struct Gd<T: GodotClass> {
     pub(crate) opaque: OpaqueObject,
 
     // Last known instance ID -- this may no longer be valid!
-    cached_instance_id: std::cell::Cell<Option<InstanceId>>,
+    cached_instance_id: atomic::AtomicU64,
     _marker: PhantomData<*const T>,
 }
 
@@ -211,9 +212,9 @@ impl<T: GodotClass> Gd<T> {
     }
 
     fn from_opaque(opaque: OpaqueObject) -> Self {
-        let obj = Self {
+        let mut obj = Self {
             opaque,
-            cached_instance_id: std::cell::Cell::new(None),
+            cached_instance_id: atomic::AtomicU64::new(0),
             _marker: PhantomData,
         };
 
@@ -221,18 +222,23 @@ impl<T: GodotClass> Gd<T> {
         let id = unsafe { interface_fn!(object_get_instance_id)(obj.obj_sys()) };
         let instance_id = InstanceId::try_from_u64(id)
             .expect("Gd initialization failed; did you call share() on a dead instance?");
-        obj.cached_instance_id.set(Some(instance_id));
+        obj.cached_instance_id = atomic::AtomicU64::new(instance_id.to_u64());
 
         obj
     }
 
     /// Returns the instance ID of this object, or `None` if the object is dead.
     pub fn instance_id_or_none(&self) -> Option<InstanceId> {
-        let known_id = match self.cached_instance_id.get() {
+        let instance_id = InstanceId::try_from_u64(
+            self.cached_instance_id
+                .load(atomic::Ordering::Relaxed),
+        );
+
+        let known_id = match instance_id {
             // Already dead
             None => return None,
 
-            // Possibly alive
+            // Possible alive
             Some(id) => id,
         };
 
@@ -241,7 +247,8 @@ impl<T: GodotClass> Gd<T> {
         if engine::utilities::is_instance_id_valid(known_id.to_i64()) {
             Some(known_id)
         } else {
-            self.cached_instance_id.set(None);
+            self.cached_instance_id
+                .store(0, atomic::Ordering::Relaxed);
             None
         }
     }
