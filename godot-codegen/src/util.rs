@@ -4,11 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::api_parser::Enum;
+use crate::api_parser::{ClassConstant, Enum, MethodArg, MethodReturn};
 use crate::special_cases::is_builtin_scalar;
 use crate::{Context, ModName, RustTy, TyName};
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeStructuresField {
+    pub field_type: String,
+    pub field_name: String,
+}
 
 pub fn make_enum_definition(enum_: &Enum) -> TokenStream {
     // TODO enums which have unique ords could be represented as Rust enums
@@ -58,12 +64,20 @@ pub fn make_enum_definition(enum_: &Enum) -> TokenStream {
         None
     };
 
+    let mut derives = vec!["Copy", "Clone", "Eq", "PartialEq", "Debug", "Hash"];
+
+    if enum_.is_bitfield {
+        derives.push("Default");
+    }
+
+    let derives = derives.into_iter().map(ident);
+
     // Enumerator ordinal stored as i32, since that's enough to hold all current values and the default repr in C++.
     // Public interface is i64 though, for consistency (and possibly forward compatibility?).
     // TODO maybe generalize GodotFfi over EngineEnum trait
     quote! {
         #[repr(transparent)]
-        #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+        #[derive(#( #derives ),*)]
         pub struct #enum_name {
             ord: i32
         }
@@ -91,11 +105,37 @@ pub fn make_enum_definition(enum_: &Enum) -> TokenStream {
                 self.ord
             }
         }
-        impl sys::GodotFfi for #enum_name {
+        // SAFETY:
+        // The enums are transparently represented as an `i32`, so `*mut Self` is sound.
+        unsafe impl sys::GodotFfi for #enum_name {
             sys::ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
         }
         #bitfield_ops
     }
+}
+
+pub fn make_constant_definition(constant: &ClassConstant) -> TokenStream {
+    let ClassConstant { name, value } = constant;
+    let name = ident(name);
+
+    if constant.name.starts_with("NOTIFICATION_") {
+        // Already exposed through enums
+        quote! {
+            pub(crate) const #name: i32 = #value;
+        }
+    } else {
+        quote! {
+            pub const #name: i32 = #value;
+        }
+    }
+}
+
+/// Tries to interpret the constant as a notification one, and transforms it to a Rust identifier on success.
+pub fn try_to_notification(constant: &ClassConstant) -> Option<Ident> {
+    constant
+        .name
+        .strip_prefix("NOTIFICATION_")
+        .map(|s| ident(&shout_to_pascal(s)))
 }
 
 fn make_enum_name(enum_name: &str) -> Ident {
@@ -145,6 +185,27 @@ pub fn to_pascal_case(class_name: &str) -> String {
         .replace("GdNative", "GDNative")
 }
 
+pub fn shout_to_pascal(shout_case: &str) -> String {
+    // TODO use heck?
+
+    let mut result = String::with_capacity(shout_case.len());
+    let mut next_upper = true;
+
+    for ch in shout_case.chars() {
+        if next_upper {
+            assert_ne!(ch, '_'); // no double underscore
+            result.push(ch); // unchanged
+            next_upper = false;
+        } else if ch == '_' {
+            next_upper = true;
+        } else {
+            result.push(ch.to_ascii_lowercase());
+        }
+    }
+
+    result
+}
+
 pub fn ident(s: &str) -> Ident {
     format_ident!("{}", s)
 }
@@ -182,9 +243,32 @@ fn to_hardcoded_rust_type(ty: &str) -> Option<&str> {
         "enum::Variant.Type" => "VariantType",
         "enum::Variant.Operator" => "VariantOperator",
         "enum::Vector3.Axis" => "Vector3Axis",
+        // Types needed for native structures mapping
+        "uint8_t" => "u8",
+        "uint16_t" => "u16",
+        "uint32_t" => "u32",
+        "uint64_t" => "u64",
+        "int8_t" => "i8",
+        "int16_t" => "i16",
+        "int32_t" => "i32",
+        "int64_t" => "i64",
+        "real_t" => "real",
+        "void" => "c_void",
         _ => return None,
     };
     Some(result)
+}
+
+/// Maps an input type to a Godot type with the same C representation. This is subtly different than [`to_rust_type`],
+/// which maps to an appropriate corresponding Rust type. This function should be used in situations where the C ABI for
+/// a type must match the Godot equivalent exactly, such as when dealing with pointers.
+pub(crate) fn to_rust_type_abi(ty: &str, ctx: &mut Context<'_>) -> RustTy {
+    match ty {
+        "int" => RustTy::BuiltinIdent(ident("i32")),
+        "float" => RustTy::BuiltinIdent(ident("f32")),
+        "double" => RustTy::BuiltinIdent(ident("f64")),
+        _ => to_rust_type(ty, ctx),
+    }
 }
 
 /// Maps an _input_ type from the Godot JSON to the corresponding Rust type (wrapping some sort of a token stream).
@@ -213,6 +297,27 @@ fn to_rust_type_uncached(ty: &str, ctx: &mut Context) -> RustTy {
         }
     }
 
+    if ty.ends_with('*') {
+        // Pointer type; strip '*', see if const, and then resolve the
+        // inner type.
+        let mut ty = ty[0..ty.len() - 1].to_string();
+        // 'const' should apply to the innermost pointer, if present.
+        let is_const = ty.starts_with("const ") && !ty.ends_with('*');
+        if is_const {
+            ty = ty.replace("const ", "");
+        }
+        // .trim() is necessary here, as the Godot extension API
+        // places a space between a type and its stars if it's a
+        // double pointer. That is, Godot writes "int*" but, if it's a
+        // double pointer, then it writes "int **" instead (with a
+        // space in the middle).
+        let inner_type = to_rust_type(ty.trim(), ctx);
+        return RustTy::RawPointer {
+            inner: Box::new(inner_type),
+            is_const,
+        };
+    }
+
     if let Some(hardcoded) = to_hardcoded_rust_type(ty) {
         return RustTy::BuiltinIdent(ident(hardcoded));
     }
@@ -228,7 +333,7 @@ fn to_rust_type_uncached(ty: &str, ctx: &mut Context) -> RustTy {
             let enum_ty = make_enum_name(enum_);
 
             RustTy::EngineEnum {
-                tokens: quote! { #module::#enum_ty },
+                tokens: quote! { crate::engine::#module::#enum_ty },
                 surrounding_class: Some(class.to_string()),
             }
         } else {
@@ -236,7 +341,7 @@ fn to_rust_type_uncached(ty: &str, ctx: &mut Context) -> RustTy {
             let enum_ty = make_enum_name(qualified_enum);
 
             RustTy::EngineEnum {
-                tokens: quote! { global::#enum_ty },
+                tokens: quote! { crate::engine::global::#enum_ty },
                 surrounding_class: None,
             }
         };
@@ -262,14 +367,63 @@ fn to_rust_type_uncached(ty: &str, ctx: &mut Context) -> RustTy {
     }
 
     // Note: do not check if it's a known engine class, because that will not work in minimal mode (since not all classes are stored)
-    if ctx.is_builtin(ty) {
+    if ctx.is_builtin(ty) || ctx.is_native_structure(ty) {
         // Unchanged
         RustTy::BuiltinIdent(rustify_ty(ty))
     } else {
         let ty = rustify_ty(ty);
         RustTy::EngineClass {
-            tokens: quote! { Gd<#ty> },
+            tokens: quote! { Gd<crate::engine::#ty> },
             class: ty.to_string(),
         }
     }
+}
+
+/// Parse a string of semicolon-separated C-style type declarations. Fail with `None` if any errors occur.
+pub fn parse_native_structures_format(input: &str) -> Option<Vec<NativeStructuresField>> {
+    input
+        .split(';')
+        .filter(|var| !var.trim().is_empty())
+        .map(|var| {
+            let mut parts = var.trim().splitn(2, ' ');
+            let mut field_type = parts.next()?.to_owned();
+            let mut field_name = parts.next()?.to_owned();
+
+            // If the field is a pointer, put the star on the type, not
+            // the name.
+            if field_name.starts_with('*') {
+                field_name.remove(0);
+                field_type.push('*');
+            }
+
+            // If Godot provided a default value, ignore it. (TODO We
+            // might use these if we synthetically generate constructors
+            // in the future)
+            if let Some(index) = field_name.find(" = ") {
+                field_name.truncate(index);
+            }
+
+            Some(NativeStructuresField {
+                field_type,
+                field_name,
+            })
+        })
+        .collect()
+}
+
+pub fn function_uses_pointers(
+    method_args: &Option<Vec<MethodArg>>,
+    return_value: &Option<&MethodReturn>,
+) -> bool {
+    if let Some(method_args) = method_args {
+        if method_args.iter().any(|x| x.type_.contains('*')) {
+            return true;
+        }
+    }
+    if let Some(return_value) = return_value {
+        if return_value.type_.contains('*') {
+            return true;
+        }
+    }
+    false
 }

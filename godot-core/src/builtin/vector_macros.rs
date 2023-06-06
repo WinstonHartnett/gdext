@@ -238,6 +238,18 @@ macro_rules! impl_common_vector_fns {
             pub fn abs(self) -> Self {
                 Self::from_glam(self.to_glam().abs())
             }
+
+            /// Returns a new vector containing the minimum of the two vectors, component-wise.
+            #[inline]
+            pub fn coord_min(self, other: Self) -> Self {
+                self.glam2(&other, |a, b| a.min(b))
+            }
+
+            /// Returns a new vector containing the maximum of the two vectors, component-wise.
+            #[inline]
+            pub fn coord_max(self, other: Self) -> Self {
+                self.glam2(&other, |a, b| a.max(b))
+            }
         }
     };
 }

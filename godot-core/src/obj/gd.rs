@@ -13,13 +13,19 @@ use std::sync::atomic;
 use godot_ffi as sys;
 use godot_ffi::VariantType;
 use sys::types::OpaqueObject;
-use sys::{ffi_methods, interface_fn, static_assert_eq_size, GodotFfi};
+use sys::{
+    ffi_methods, interface_fn, static_assert_eq_size, GodotFfi, GodotNullablePtr, PtrcallType,
+};
 
 use crate::builtin::meta::{ClassName, VariantMetadata};
-use crate::builtin::{FromVariant, ToVariant, Variant, VariantConversionError};
+use crate::builtin::{
+    Callable, FromVariant, GodotString, StringName, ToVariant, Variant, VariantConversionError,
+};
+use crate::engine::{Node, Object, Resource};
+use crate::export::{Export, ExportInfo, TypeStringHint};
 use crate::obj::dom::Domain as _;
 use crate::obj::mem::Memory as _;
-use crate::obj::{cap, dom, mem, GodotClass, Inherits, Share};
+use crate::obj::{cap, dom, mem, EngineEnum, GodotClass, Inherits, Share};
 use crate::obj::{GdMut, GdRef, InstanceId};
 use crate::storage::InstanceStorage;
 use crate::{callbacks, engine, out};
@@ -163,7 +169,7 @@ where
         let callbacks = crate::storage::nop_instance_callbacks();
 
         unsafe {
-            let token = sys::get_library();
+            let token = sys::get_library() as *mut std::ffi::c_void;
             let binding =
                 interface_fn!(object_get_instance_binding)(self.obj_sys(), token, &callbacks);
 
@@ -172,7 +178,7 @@ where
                 "Class {} -- null instance; does the class have a Godot creator function?",
                 std::any::type_name::<T>()
             );
-            crate::private::as_storage::<T>(binding)
+            crate::private::as_storage::<T>(binding as sys::GDExtensionClassInstancePtr)
         }
     }
 }
@@ -331,11 +337,31 @@ impl<T: GodotClass> Gd<T> {
         })
     }
 
+    // Temporary workaround for bug in Godot that makes casts always succeed.
+    // (See https://github.com/godot-rust/gdext/issues/158)
+    // TODO(#234) remove this code once the bug is fixed upstream.
+    fn is_cast_valid<U>(&self) -> bool
+    where
+        U: GodotClass,
+    {
+        let as_obj = unsafe { self.ffi_cast::<Object>() }.expect("Everything inherits object");
+        let cast_is_valid = as_obj.is_class(GodotString::from(U::CLASS_NAME));
+        std::mem::forget(as_obj);
+        cast_is_valid
+    }
+
     /// Returns `Ok(cast_obj)` on success, `Err(self)` on error
     pub fn owned_cast<U>(self) -> Result<Gd<U>, Self>
     where
         U: GodotClass,
     {
+        // Temporary workaround for bug in Godot that makes casts always
+        // succeed. (See https://github.com/godot-rust/gdext/issues/158)
+        // TODO(#234) remove this check once the bug is fixed upstream.
+        if !self.is_cast_valid::<U>() {
+            return Err(self);
+        }
+
         // The unsafe { std::mem::transmute<&T, &Base>(self.inner()) } relies on the C++ static_cast class casts
         // to return the same pointer, however in theory those may yield a different pointer (VTable offset,
         // virtual inheritance etc.). It *seems* to work so far, but this is no indication it's not UB.
@@ -402,7 +428,6 @@ impl<T: GodotClass> Gd<T> {
 
         fn from_obj_sys_weak = from_sys;
         fn obj_sys = sys;
-        fn write_obj_sys = write_sys;
     }
 
     /// Initializes this `Gd<T>` from the object pointer as a **strong ref**, meaning
@@ -423,6 +448,11 @@ impl<T: GodotClass> Gd<T> {
         // init_ref also doesn't hurt (except 1 possibly unnecessary check).
         T::Mem::maybe_init_ref(&self);
         self
+    }
+
+    /// Returns a callable referencing a method from this object named `method_name`.
+    pub fn callable<S: Into<StringName>>(&self, method_name: S) -> Callable {
+        Callable::from_object_method(self.share(), method_name)
     }
 }
 
@@ -507,10 +537,59 @@ where
         unsafe { std::mem::transmute::<&mut OpaqueObject, &mut T>(&mut self.opaque) }
     }
 }
+// SAFETY:
+// - `move_return_ptr`
+//   When the `call_type` is `PtrcallType::Virtual`, and the current type is known to inherit from `RefCounted`
+//   then we use `ref_get_object`. Otherwise we use `Gd::from_obj_sys`.
+// - `from_arg_ptr`
+//   When the `call_type` is `PtrcallType::Virtual`, and the current type is known to inherit from `RefCounted`
+//   then we use `ref_set_object`. Otherwise we use `std::ptr::write`. Finally we forget `self` as we pass
+//   ownership to the caller.
+unsafe impl<T> GodotFfi for Gd<T>
+where
+    T: GodotClass,
+{
+    ffi_methods! { type sys::GDExtensionTypePtr = Opaque;
+        fn from_sys;
+        fn from_sys_init;
+        fn sys;
+    }
 
-impl<T: GodotClass> GodotFfi for Gd<T> {
-    ffi_methods! { type sys::GDExtensionTypePtr = Opaque; .. }
+    // For more context around `ref_get_object` and `ref_set_object`, see:
+    // https://github.com/godotengine/godot-cpp/issues/954
+
+    unsafe fn from_arg_ptr(ptr: sys::GDExtensionTypePtr, call_type: PtrcallType) -> Self {
+        let obj_ptr = if T::Mem::pass_as_ref(call_type) {
+            // ptr is `Ref<T>*`
+            // See the docs for `PtrcallType::Virtual` for more info on `Ref<T>`.
+            interface_fn!(ref_get_object)(ptr as sys::GDExtensionRefPtr)
+        } else if matches!(call_type, PtrcallType::Virtual) {
+            // ptr is `T**`
+            *(ptr as *mut sys::GDExtensionObjectPtr)
+        } else {
+            // ptr is `T*`
+            ptr as sys::GDExtensionObjectPtr
+        };
+
+        // obj_ptr is `T*`
+        Self::from_obj_sys(obj_ptr)
+    }
+
+    unsafe fn move_return_ptr(self, ptr: sys::GDExtensionTypePtr, call_type: PtrcallType) {
+        if T::Mem::pass_as_ref(call_type) {
+            interface_fn!(ref_set_object)(ptr as sys::GDExtensionRefPtr, self.obj_sys())
+        } else {
+            std::ptr::write(ptr as *mut _, self.opaque)
+        }
+        // We've passed ownership to caller.
+        std::mem::forget(self);
+    }
 }
+
+// SAFETY:
+// `Gd<T: GodotClass>` will only contain types that inherit from `crate::engine::Object`.
+// Godots `Object` in turn is known to be nullable and always a pointer.
+unsafe impl<T: GodotClass> GodotNullablePtr for Gd<T> {}
 
 impl<T: GodotClass> Gd<T> {
     /// Runs `init_fn` on the address of a pointer (initialized to null). If that pointer is still null after the `init_fn` call,
@@ -523,6 +602,11 @@ impl<T: GodotClass> Gd<T> {
     /// `init_fn` must be a function that correctly handles a _type pointer_ pointing to an _object pointer_.
     #[doc(hidden)]
     pub unsafe fn from_sys_init_opt(init_fn: impl FnOnce(sys::GDExtensionTypePtr)) -> Option<Self> {
+        // TODO(uninit) - should we use GDExtensionUninitializedTypePtr instead? Then update all the builtin codegen...
+        let init_fn = |ptr| {
+            init_fn(sys::AsUninit::force_init(ptr));
+        };
+
         // Note: see _call_native_mb_ret_obj() in godot-cpp, which does things quite different (e.g. querying the instance binding).
 
         // Initialize pointer with given function, return Some(ptr) on success and None otherwise
@@ -539,14 +623,14 @@ impl<T: GodotClass> Gd<T> {
 /// `init_fn` must be a function that correctly handles a _type pointer_ pointing to an _object pointer_.
 #[doc(hidden)]
 pub unsafe fn raw_object_init(
-    init_fn: impl FnOnce(sys::GDExtensionTypePtr),
+    init_fn: impl FnOnce(sys::GDExtensionUninitializedTypePtr),
 ) -> sys::GDExtensionObjectPtr {
     // return_ptr has type GDExtensionTypePtr = GDExtensionObjectPtr* = OpaqueObject* = Object**
     // (in other words, the type-ptr contains the _address_ of an object-ptr).
     let mut object_ptr: sys::GDExtensionObjectPtr = ptr::null_mut();
     let return_ptr: *mut sys::GDExtensionObjectPtr = ptr::addr_of_mut!(object_ptr);
 
-    init_fn(return_ptr as sys::GDExtensionTypePtr);
+    init_fn(return_ptr as sys::GDExtensionUninitializedTypePtr);
 
     // We don't need to know if Object** is null, but if Object* is null; return_ptr has the address of a local (never null).
     object_ptr
@@ -595,15 +679,66 @@ impl<T: GodotClass> Share for Gd<T> {
     }
 }
 
+impl<T: GodotClass> TypeStringHint for Gd<T> {
+    fn type_string() -> String {
+        use engine::global::PropertyHint;
+
+        match Self::default_export_info().hint {
+            hint @ (PropertyHint::PROPERTY_HINT_RESOURCE_TYPE
+            | PropertyHint::PROPERTY_HINT_NODE_TYPE) => {
+                format!(
+                    "{}/{}:{}",
+                    VariantType::Object as i32,
+                    hint.ord(),
+                    T::CLASS_NAME
+                )
+            }
+            _ => format!("{}:", VariantType::Object as i32),
+        }
+    }
+}
+
+impl<T: GodotClass> Export for Gd<T> {
+    fn export(&self) -> Self {
+        self.share()
+    }
+
+    fn default_export_info() -> ExportInfo {
+        let hint = if T::inherits::<Resource>() {
+            engine::global::PropertyHint::PROPERTY_HINT_RESOURCE_TYPE
+        } else if T::inherits::<Node>() {
+            engine::global::PropertyHint::PROPERTY_HINT_NODE_TYPE
+        } else {
+            engine::global::PropertyHint::PROPERTY_HINT_NONE
+        };
+
+        // Godot does this by default too, it doesn't seem to make a difference when not a resource/node
+        // but is needed when it is a resource/node.
+        let hint_string = T::CLASS_NAME.into();
+
+        ExportInfo {
+            variant_type: Self::variant_type(),
+            hint,
+            hint_string,
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Trait impls
 
 impl<T: GodotClass> FromVariant for Gd<T> {
     fn try_from_variant(variant: &Variant) -> Result<Self, VariantConversionError> {
         let result_or_none = unsafe {
-            Self::from_sys_init_opt(|self_ptr| {
+            // TODO(#234) replace Gd::<Object> with Self when Godot stops allowing illegal conversions
+            // See https://github.com/godot-rust/gdext/issues/158
+
+            // TODO(uninit) - see if we can use from_sys_init()
+            use ::godot_ffi::AsUninit;
+
+            Gd::<Object>::from_sys_init_opt(|self_ptr| {
                 let converter = sys::builtin_fn!(object_from_variant);
-                converter(self_ptr, variant.var_sys());
+                converter(self_ptr.as_uninit(), variant.var_sys());
             })
         };
 
@@ -611,7 +746,10 @@ impl<T: GodotClass> FromVariant for Gd<T> {
         // (This behaves differently in the opposite direction `object_to_variant`.)
         result_or_none
             .map(|obj| obj.with_inc_refcount())
-            .ok_or(VariantConversionError)
+            // TODO(#234) remove this cast when Godot stops allowing illegal conversions
+            // (See https://github.com/godot-rust/gdext/issues/158)
+            .and_then(|obj| obj.owned_cast().ok())
+            .ok_or(VariantConversionError::BadType)
     }
 }
 
@@ -637,6 +775,25 @@ impl<T: GodotClass> ToVariant for Gd<T> {
     }
 }
 
+impl<T: GodotClass> ToVariant for Option<Gd<T>> {
+    fn to_variant(&self) -> Variant {
+        match self {
+            Some(gd) => gd.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+}
+
+impl<T: GodotClass> FromVariant for Option<Gd<T>> {
+    fn try_from_variant(variant: &Variant) -> Result<Self, VariantConversionError> {
+        if variant.is_nil() {
+            Ok(None)
+        } else {
+            Gd::try_from_variant(variant).map(Some)
+        }
+    }
+}
+
 impl<T: GodotClass> PartialEq for Gd<T> {
     /// ⚠️ Returns whether two `Gd` pointers point to the same object.
     ///
@@ -650,14 +807,7 @@ impl<T: GodotClass> PartialEq for Gd<T> {
 
 impl<T: GodotClass> Eq for Gd<T> {}
 
-impl<T> Display for Gd<T>
-where
-    T: GodotClass<Declarer = dom::EngineDomain>,
-{
-    // TODO support for user objects? should it return the engine repr, or a custom <T as Display>::fmt()?
-    // If the latter, we would need to do something like impl<T> Display for Gd<T> where T: Display,
-    // and thus implement it for each class separately (or blanket GodotClass/EngineClass/...).
-
+impl<T: GodotClass> Display for Gd<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         engine::display_string(self, f)
     }

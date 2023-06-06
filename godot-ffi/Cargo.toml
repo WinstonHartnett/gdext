@@ -2,20 +2,19 @@
 name = "godot-ffi"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.63"
+rust-version = "1.66"
 license = "MPL-2.0"
 keywords = ["gamedev", "godot", "engine", "ffi"]
 categories = ["game-engines", "graphics"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [features]
+custom-godot = ["godot-bindings/custom-godot"]
 codegen-fmt = ["godot-codegen/codegen-fmt"]
-#codegen-full = ["godot-codegen/codegen-full"]
+trace = []
 
 [dependencies]
 paste = "1"
 
 [build-dependencies]
-bindgen = { version = "0.63.0", default-features = false, features = ["runtime"] }
+godot-bindings = { path = "../godot-bindings" }
 godot-codegen = { path = "../godot-codegen" }

@@ -108,18 +108,17 @@ impl Variant {
         let args_sys: Vec<_> = args.iter().map(|v| v.var_sys_const()).collect();
         let mut error = sys::default_call_error();
 
-        #[allow(unused_mut)]
-        let mut result = Variant::nil();
-
-        unsafe {
-            interface_fn!(variant_call)(
-                self.var_sys(),
-                method.string_sys(),
-                args_sys.as_ptr(),
-                args_sys.len() as i64,
-                result.var_sys(),
-                ptr::addr_of_mut!(error),
-            )
+        let result = unsafe {
+            Variant::from_var_sys_init_or_init_default(|variant_ptr| {
+                interface_fn!(variant_call)(
+                    self.var_sys(),
+                    method.string_sys(),
+                    args_sys.as_ptr(),
+                    args_sys.len() as i64,
+                    variant_ptr,
+                    ptr::addr_of_mut!(error),
+                )
+            })
         };
 
         if error.error != sys::GDEXTENSION_CALL_OK {
@@ -133,16 +132,16 @@ impl Variant {
         let op_sys = op.sys();
         let mut is_valid = false as u8;
 
-        #[allow(unused_mut)]
-        let mut result = Variant::nil();
-        unsafe {
-            interface_fn!(variant_evaluate)(
-                op_sys,
-                self.var_sys(),
-                rhs.var_sys(),
-                result.var_sys(),
-                ptr::addr_of_mut!(is_valid),
-            )
+        let result = unsafe {
+            Self::from_var_sys_init_or_init_default(|variant_ptr| {
+                interface_fn!(variant_evaluate)(
+                    op_sys,
+                    self.var_sys(),
+                    rhs.var_sys(),
+                    variant_ptr,
+                    ptr::addr_of_mut!(is_valid),
+                )
+            })
         };
 
         if is_valid == 1 {
@@ -193,7 +192,36 @@ impl Variant {
         fn from_var_sys = from_sys;
         fn from_var_sys_init = from_sys_init;
         fn var_sys = sys;
-        fn write_var_sys = write_sys;
+    }
+
+    #[doc(hidden)]
+    pub unsafe fn from_var_sys_init_default(
+        init_fn: impl FnOnce(sys::GDExtensionVariantPtr),
+    ) -> Self {
+        #[allow(unused_mut)]
+        let mut variant = Variant::nil();
+        init_fn(variant.var_sys());
+        variant
+    }
+
+    /// # Safety
+    ///
+    /// See [`GodotFfi::from_sys_init`] and [`GodotFfi::from_sys_init_default`].
+    #[cfg(gdextension_api = "4.0")]
+    pub unsafe fn from_var_sys_init_or_init_default(
+        init_fn: impl FnOnce(sys::GDExtensionVariantPtr),
+    ) -> Self {
+        Self::from_var_sys_init_default(init_fn)
+    }
+
+    /// # Safety
+    ///
+    /// See [`GodotFfi::from_sys_init`] and [`GodotFfi::from_sys_init_default`].
+    #[cfg(not(gdextension_api = "4.0"))]
+    pub unsafe fn from_var_sys_init_or_init_default(
+        init_fn: impl FnOnce(sys::GDExtensionUninitializedVariantPtr),
+    ) -> Self {
+        Self::from_var_sys_init(init_fn)
     }
 
     #[doc(hidden)]
@@ -201,21 +229,21 @@ impl Variant {
         sys::to_const_ptr(self.var_sys())
     }
 
+    /// Converts to variant pointer; can be a null pointer.
     pub(crate) fn ptr_from_sys(variant_ptr: sys::GDExtensionVariantPtr) -> *const Variant {
-        assert!(!variant_ptr.is_null(), "ptr_from_sys: null variant pointer");
         variant_ptr as *const Variant
     }
 
+    /// Converts to variant mut pointer; can be a null pointer.
     pub(crate) fn ptr_from_sys_mut(variant_ptr: sys::GDExtensionVariantPtr) -> *mut Variant {
-        assert!(
-            !variant_ptr.is_null(),
-            "ptr_from_sys_mut: null variant pointer"
-        );
         variant_ptr as *mut Variant
     }
 }
 
-impl GodotFfi for Variant {
+// SAFETY:
+// `from_opaque` properly initializes a dereferenced pointer to an `OpaqueVariant`.
+// `std::mem::swap` is sufficient for returning a value.
+unsafe impl GodotFfi for Variant {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
 
     unsafe fn from_sys_init_default(init_fn: impl FnOnce(sys::GDExtensionTypePtr)) -> Self {

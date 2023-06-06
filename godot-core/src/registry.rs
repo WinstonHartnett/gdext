@@ -13,7 +13,6 @@ use godot_ffi as sys;
 
 use sys::interface_fn;
 
-use crate::bind::GodotExt;
 use crate::builtin::meta::ClassName;
 use crate::builtin::StringName;
 use crate::out;
@@ -45,7 +44,7 @@ impl Debug for ErasedRegisterFn {
 }
 
 /// Represents the data part of a [`ClassPlugin`] instance.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum PluginComponent {
     /// Class definition itself, must always be available
     ClassDef {
@@ -89,7 +88,15 @@ pub enum PluginComponent {
             unsafe extern "C" fn(
                 p_instance: sys::GDExtensionClassInstancePtr,
                 r_is_valid: *mut sys::GDExtensionBool,
-                p_out: sys::GDExtensionStringPtr,
+                r_out: sys::GDExtensionStringPtr,
+            ),
+        >,
+
+        /// User-defined `on_notification` function
+        user_on_notification_fn: Option<
+            unsafe extern "C" fn(
+                p_instance: sys::GDExtensionClassInstancePtr, //
+                p_what: i32,
             ),
         >,
 
@@ -113,7 +120,13 @@ struct ClassRegistrationInfo {
 }
 
 /// Registers a class with static type information.
-pub fn register_class<T: GodotExt + cap::GodotInit + cap::ImplementsGodotExt>() {
+pub fn register_class<
+    T: cap::GodotInit
+        + cap::ImplementsGodotVirtual
+        + cap::GodotToString
+        + cap::GodotNotification
+        + cap::GodotRegisterClass,
+>() {
     // TODO: provide overloads with only some trait impls
 
     out!("Manually register class {}", std::any::type_name::<T>());
@@ -121,6 +134,7 @@ pub fn register_class<T: GodotExt + cap::GodotInit + cap::ImplementsGodotExt>() 
 
     let godot_params = sys::GDExtensionClassCreationInfo {
         to_string_func: Some(callbacks::to_string::<T>),
+        notification_func: Some(callbacks::on_notification::<T>),
         reference_func: Some(callbacks::reference::<T>),
         unreference_func: Some(callbacks::unreference::<T>),
         create_instance_func: Some(callbacks::create::<T>),
@@ -202,11 +216,13 @@ fn fill_class_info(component: PluginComponent, c: &mut ClassRegistrationInfo) {
             user_register_fn,
             user_create_fn,
             user_to_string_fn,
+            user_on_notification_fn,
             get_virtual_fn,
         } => {
             c.user_register_fn = user_register_fn;
             fill_into(&mut c.godot_params.create_instance_func, user_create_fn);
             c.godot_params.to_string_func = user_to_string_fn;
+            c.godot_params.notification_func = user_on_notification_fn;
             c.godot_params.get_virtual_func = Some(get_virtual_fn);
         }
     }
@@ -272,7 +288,6 @@ fn register_class_raw(info: ClassRegistrationInfo) {
 #[allow(clippy::missing_safety_doc)]
 pub mod callbacks {
     use super::*;
-    use crate::bind::GodotExt;
     use crate::builder::ClassBuilder;
     use crate::obj::Base;
 
@@ -299,15 +314,15 @@ pub mod callbacks {
         let user_instance = make_user_instance(base);
         let instance = InstanceStorage::<T>::construct(user_instance);
         let instance_ptr = instance.into_raw();
-        let instance_ptr = instance_ptr as *mut std::ffi::c_void; // TODO GDExtensionClassInstancePtr
+        let instance_ptr = instance_ptr as sys::GDExtensionClassInstancePtr;
 
         let binding_data_callbacks = crate::storage::nop_instance_callbacks();
         unsafe {
             interface_fn!(object_set_instance)(base_ptr, class_name.string_sys(), instance_ptr);
             interface_fn!(object_set_instance_binding)(
                 base_ptr,
-                sys::get_library(),
-                instance_ptr,
+                sys::get_library() as *mut std::ffi::c_void,
+                instance_ptr as *mut std::ffi::c_void,
                 &binding_data_callbacks,
             );
         }
@@ -326,7 +341,7 @@ pub mod callbacks {
         let _drop = Box::from_raw(storage as *mut InstanceStorage<_>);
     }
 
-    pub unsafe extern "C" fn get_virtual<T: cap::ImplementsGodotExt>(
+    pub unsafe extern "C" fn get_virtual<T: cap::ImplementsGodotVirtual>(
         _class_user_data: *mut std::ffi::c_void,
         name: sys::GDExtensionConstStringNamePtr,
     ) -> sys::GDExtensionClassCallVirtual {
@@ -338,7 +353,7 @@ pub mod callbacks {
         T::__virtual_call(method_name.as_str())
     }
 
-    pub unsafe extern "C" fn to_string<T: GodotExt>(
+    pub unsafe extern "C" fn to_string<T: cap::GodotToString>(
         instance: sys::GDExtensionClassInstancePtr,
         _is_valid: *mut sys::GDExtensionBool,
         out_string: sys::GDExtensionStringPtr,
@@ -348,11 +363,20 @@ pub mod callbacks {
 
         let storage = as_storage::<T>(instance);
         let instance = storage.get();
-        let string = <T as GodotExt>::to_string(&*instance);
+        let string = T::__godot_to_string(&*instance);
 
-        // Transfer ownership to Godot, disable destructor
-        string.write_string_sys(out_string);
-        std::mem::forget(string);
+        // Transfer ownership to Godot
+        string.move_string_ptr(out_string);
+    }
+
+    pub unsafe extern "C" fn on_notification<T: cap::GodotNotification>(
+        instance: sys::GDExtensionClassInstancePtr,
+        what: i32,
+    ) {
+        let storage = as_storage::<T>(instance);
+        let mut instance = storage.get_mut();
+
+        T::__godot_notification(&mut *instance, what);
     }
 
     pub unsafe extern "C" fn reference<T: GodotClass>(instance: sys::GDExtensionClassInstancePtr) {
@@ -380,14 +404,14 @@ pub mod callbacks {
         Box::new(instance)
     }
 
-    pub fn register_class_by_builder<T: GodotExt>(_class_builder: &mut dyn Any) {
+    pub fn register_class_by_builder<T: cap::GodotRegisterClass>(_class_builder: &mut dyn Any) {
         // TODO use actual argument, once class builder carries state
         // let class_builder = class_builder
         //     .downcast_mut::<ClassBuilder<T>>()
         //     .expect("bad type erasure");
 
         let mut class_builder = ClassBuilder::new();
-        T::register_class(&mut class_builder);
+        T::__godot_register_class(&mut class_builder);
     }
 
     pub fn register_user_binds<T: cap::ImplementsGodotApi + cap::ImplementsGodotExports>(

@@ -11,6 +11,9 @@ use sys::{ffi_methods, GodotFfi};
 
 use crate::builtin::Vector4;
 
+use super::glam_helpers::{GlamConv, GlamType};
+use super::IVec4;
+
 /// Vector used for 4D math using integer coordinates.
 ///
 /// 4-element structure that can be used to represent 4D grid coordinates or sets of integers.
@@ -19,15 +22,19 @@ use crate::builtin::Vector4;
 /// required. Note that the values are limited to 32 bits, and unlike [`Vector4`] this cannot be
 /// configured with an engine build option. Use `i64` or [`PackedInt64Array`] if 64-bit values are
 /// needed.
-#[derive(Debug, Default, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vector4i {
     /// The vector's X component.
     pub x: i32,
+
     /// The vector's Y component.
     pub y: i32,
+
     /// The vector's Z component.
     pub z: i32,
+
     /// The vector's W component.
     pub w: i32,
 }
@@ -65,13 +72,13 @@ impl Vector4i {
     pub const ONE: Self = Self::splat(1);
 
     /// Converts the corresponding `glam` type to `Self`.
-    fn from_glam(v: glam::IVec4) -> Self {
+    fn from_glam(v: IVec4) -> Self {
         Self::new(v.x, v.y, v.z, v.w)
     }
 
     /// Converts `self` to the corresponding `glam` type.
-    fn to_glam(self) -> glam::IVec4 {
-        glam::IVec4::new(self.x, self.y, self.z, self.w)
+    fn to_glam(self) -> IVec4 {
+        IVec4::new(self.x, self.y, self.z, self.w)
     }
 }
 
@@ -82,24 +89,69 @@ impl fmt::Display for Vector4i {
     }
 }
 
-impl GodotFfi for Vector4i {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector4i {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 /// Enumerates the axes in a [`Vector4i`].
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 #[repr(i32)]
 pub enum Vector4iAxis {
     /// The X axis.
     X,
+
     /// The Y axis.
     Y,
+
     /// The Z axis.
     Z,
+
     /// The W axis.
     W,
 }
 
-impl GodotFfi for Vector4iAxis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector4iAxis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
+}
+
+impl GlamType for IVec4 {
+    type Mapped = Vector4i;
+
+    fn to_front(&self) -> Self::Mapped {
+        Vector4i::new(self.x, self.y, self.z, self.w)
+    }
+
+    fn from_front(mapped: &Self::Mapped) -> Self {
+        IVec4::new(mapped.x, mapped.y, mapped.z, mapped.w)
+    }
+}
+
+impl GlamConv for Vector4i {
+    type Glam = IVec4;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn coord_min_max() {
+        let a = Vector4i::new(1, 3, 5, 0);
+        let b = Vector4i::new(0, 5, 2, 1);
+        assert_eq!(a.coord_min(b), Vector4i::new(0, 3, 2, 0),);
+        assert_eq!(a.coord_max(b), Vector4i::new(1, 5, 5, 1));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let vector = Vector4i::default();
+        let expected_json = "{\"x\":0,\"y\":0,\"z\":0,\"w\":0}";
+
+        crate::builtin::test_utils::roundtrip(&vector, expected_json);
+    }
 }

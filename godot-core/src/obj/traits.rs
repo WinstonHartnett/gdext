@@ -4,6 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::builder::ClassBuilder;
+use crate::builtin::GodotString;
 use crate::obj::Base;
 
 use godot_ffi as sys;
@@ -11,6 +13,8 @@ use godot_ffi as sys;
 /// Makes `T` eligible to be managed by Godot and stored in [`Gd<T>`][crate::obj::Gd] pointers.
 ///
 /// The behavior of types implementing this trait is influenced by the associated types; check their documentation for information.
+///
+/// You wouldn't usually implement this trait yourself; use the [`GodotClass`](godot_macros::GodotClass) derive macro instead.
 pub trait GodotClass: 'static
 where
     Self: Sized,
@@ -29,6 +33,21 @@ where
     ///
     /// This may deviate from the Rust struct name: `HttpRequest::CLASS_NAME == "HTTPRequest"`.
     const CLASS_NAME: &'static str;
+
+    /// Returns whether `Self` inherits from `U`.
+    ///
+    /// This is reflexive, i.e `Self` inherits from itself.
+    ///
+    /// See also [`Inherits`] for a trait bound.
+    fn inherits<U: GodotClass>() -> bool {
+        if Self::CLASS_NAME == U::CLASS_NAME {
+            true
+        } else if Self::Base::CLASS_NAME == <()>::CLASS_NAME {
+            false
+        } else {
+            Self::Base::inherits::<U>()
+        }
+    }
 }
 
 /// Unit impl only exists to represent "no base", and is used for exactly one class: `Object`.
@@ -137,6 +156,27 @@ pub mod cap {
         fn __godot_init(base: Base<Self::Base>) -> Self;
     }
 
+    // TODO Evaluate whether we want this public or not
+    #[doc(hidden)]
+    pub trait GodotToString: GodotClass {
+        #[doc(hidden)]
+        fn __godot_to_string(&self) -> GodotString;
+    }
+
+    // TODO Evaluate whether we want this public or not
+    #[doc(hidden)]
+    pub trait GodotNotification: GodotClass {
+        #[doc(hidden)]
+        fn __godot_notification(&mut self, what: i32);
+    }
+
+    // TODO Evaluate whether we want this public or not
+    #[doc(hidden)]
+    pub trait GodotRegisterClass: GodotClass {
+        #[doc(hidden)]
+        fn __godot_register_class(builder: &mut ClassBuilder<Self>);
+    }
+
     /// Auto-implemented for `#[godot_api] impl MyClass` blocks
     pub trait ImplementsGodotApi: GodotClass {
         #[doc(hidden)]
@@ -148,8 +188,8 @@ pub mod cap {
         fn __register_exports();
     }
 
-    /// Auto-implemented for `#[godot_api] impl GodotExt for MyClass` blocks
-    pub trait ImplementsGodotExt: GodotClass {
+    /// Auto-implemented for `#[godot_api] impl XyVirtual for MyClass` blocks
+    pub trait ImplementsGodotVirtual: GodotClass {
         #[doc(hidden)]
         fn __virtual_call(_name: &str) -> sys::GDExtensionClassCallVirtual;
     }
@@ -203,6 +243,8 @@ pub mod dom {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
 pub mod mem {
+    use godot_ffi::PtrcallType;
+
     use super::private::Sealed;
     use crate::obj::{Gd, GodotClass};
     use crate::out;
@@ -219,6 +261,14 @@ pub mod mem {
 
         /// Check if ref-counted, return `None` if information is not available (dynamic and obj dead)
         fn is_ref_counted<T: GodotClass>(obj: &Gd<T>) -> Option<bool>;
+
+        /// Returns `true` if argument and return pointers are passed as `Ref<T>` pointers given this
+        /// [`PtrcallType`].
+        ///
+        /// See [`PtrcallType::Virtual`] for information about `Ref<T>` objects.
+        fn pass_as_ref(_call_type: PtrcallType) -> bool {
+            false
+        }
     }
     pub trait PossiblyManual {}
 
@@ -254,6 +304,10 @@ pub mod mem {
 
         fn is_ref_counted<T: GodotClass>(_obj: &Gd<T>) -> Option<bool> {
             Some(true)
+        }
+
+        fn pass_as_ref(call_type: PtrcallType) -> bool {
+            matches!(call_type, PtrcallType::Virtual)
         }
     }
 

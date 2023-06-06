@@ -11,18 +11,11 @@ macro_rules! impl_builtin_traits_inner {
         impl Default for $Type {
             #[inline]
             fn default() -> Self {
-                // Note: can't use from_sys_init(), as that calls the default constructor
-                // (because most assignments expect initialized target type)
-
-                let mut uninit = std::mem::MaybeUninit::<$Type>::uninit();
-
                 unsafe {
-                    let self_ptr = (*uninit.as_mut_ptr()).sys_mut();
-                    sys::builtin_call! {
-                        $gd_method(self_ptr, std::ptr::null_mut())
-                    };
-
-                    uninit.assume_init()
+                    Self::from_sys_init(|self_ptr| {
+                        let ctor = ::godot_ffi::builtin_fn!($gd_method);
+                        ctor(self_ptr, std::ptr::null_mut())
+                    })
                 }
             }
         }
@@ -33,7 +26,7 @@ macro_rules! impl_builtin_traits_inner {
             #[inline]
             fn clone(&self) -> Self {
                 unsafe {
-                    Self::from_sys_init_default(|self_ptr| {
+                    Self::from_sys_init(|self_ptr| {
                         let ctor = ::godot_ffi::builtin_fn!($gd_method);
                         let args = [self.sys_const()];
                         ctor(self_ptr, args.as_ptr());
@@ -108,21 +101,12 @@ macro_rules! impl_builtin_traits_inner {
         }
     };
 
-    // TODO remove; use godot-core/src/builtin/variant/impls.rs instead (this one is only used for Callable)
-    ( FromVariant for $Type:ty => $gd_method:ident ) => {
-        impl $crate::builtin::variant::FromVariant for $Type {
-            fn try_from_variant(variant: &$crate::builtin::Variant) -> Result<Self, $crate::builtin::variant::VariantConversionError> {
-                if variant.get_type() != <Self as $crate::builtin::meta::VariantMetadata>::variant_type() {
-                    return Err($crate::builtin::variant::VariantConversionError)
-                }
-                let result = unsafe {
-                    Self::from_sys_init_default(|self_ptr| {
-                        let converter = sys::builtin_fn!($gd_method);
-                        converter(self_ptr, variant.var_sys());
-                    })
-                };
 
-                Ok(result)
+    // Requires a `hash` function.
+    ( Hash for $Type:ty ) => {
+        impl std::hash::Hash for $Type {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.hash().hash(state)
             }
         }
     };
@@ -131,12 +115,12 @@ macro_rules! impl_builtin_traits_inner {
 macro_rules! impl_builtin_traits {
     (
         for $Type:ty {
-            $( $Trait:ident => $gd_method:ident; )*
+            $( $Trait:ident $(=> $gd_method:ident)?; )*
         }
     ) => (
         $(
             impl_builtin_traits_inner! {
-                $Trait for $Type => $gd_method
+                $Trait for $Type $(=> $gd_method)?
             }
         )*
     )
@@ -157,7 +141,10 @@ macro_rules! impl_builtin_stub {
             }
         }
 
-        impl GodotFfi for $Class {
+        // SAFETY:
+        // This is simply a wrapper around an `Opaque` value representing a value of the type.
+        // So this is safe.
+        unsafe impl GodotFfi for $Class {
             ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
         }
     };
@@ -168,6 +155,7 @@ macro_rules! impl_builtin_froms {
         $(impl From<&$From> for $To {
             fn from(other: &$From) -> Self {
                 unsafe {
+                    // TODO should this be from_sys_init_default()?
                     Self::from_sys_init(|ptr| {
                         let args = [other.sys_const()];
                         ::godot_ffi::builtin_call! {

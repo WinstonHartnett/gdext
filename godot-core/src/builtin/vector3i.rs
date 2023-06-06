@@ -11,6 +11,9 @@ use sys::{ffi_methods, GodotFfi};
 
 use crate::builtin::Vector3;
 
+use super::glam_helpers::{GlamConv, GlamType};
+use super::IVec3;
+
 /// Vector used for 3D math using integer coordinates.
 ///
 /// 3-element structure that can be used to represent positions in 3D space or any other triple of
@@ -20,13 +23,16 @@ use crate::builtin::Vector3;
 /// required. Note that the values are limited to 32 bits, and unlike [`Vector3`] this cannot be
 /// configured with an engine build option. Use `i64` or [`PackedInt64Array`] if 64-bit values are
 /// needed.
-#[derive(Debug, Default, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vector3i {
     /// The vector's X component.
     pub x: i32,
+
     /// The vector's Y component.
     pub y: i32,
+
     /// The vector's Z component.
     pub z: i32,
 }
@@ -76,13 +82,13 @@ impl Vector3i {
     }
 
     /// Converts the corresponding `glam` type to `Self`.
-    fn from_glam(v: glam::IVec3) -> Self {
+    fn from_glam(v: IVec3) -> Self {
         Self::new(v.x, v.y, v.z)
     }
 
     /// Converts `self` to the corresponding `glam` type.
-    fn to_glam(self) -> glam::IVec3 {
-        glam::IVec3::new(self.x, self.y, self.z)
+    fn to_glam(self) -> IVec3 {
+        IVec3::new(self.x, self.y, self.z)
     }
 }
 
@@ -97,7 +103,9 @@ impl_common_vector_fns!(Vector3i, i32);
 impl_vector_operators!(Vector3i, i32, (x, y, z));
 impl_vector_index!(Vector3i, i32, (x, y, z), Vector3iAxis, (X, Y, Z));
 
-impl GodotFfi for Vector3i {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector3i {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -107,12 +115,54 @@ impl GodotFfi for Vector3i {
 pub enum Vector3iAxis {
     /// The X axis.
     X,
+
     /// The Y axis.
     Y,
+
     /// The Z axis.
     Z,
 }
 
-impl GodotFfi for Vector3iAxis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector3iAxis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
+}
+
+impl GlamType for IVec3 {
+    type Mapped = Vector3i;
+
+    fn to_front(&self) -> Self::Mapped {
+        Vector3i::new(self.x, self.y, self.z)
+    }
+
+    fn from_front(mapped: &Self::Mapped) -> Self {
+        IVec3::new(mapped.x, mapped.y, mapped.z)
+    }
+}
+
+impl GlamConv for Vector3i {
+    type Glam = IVec3;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn coord_min_max() {
+        let a = Vector3i::new(1, 3, 5);
+        let b = Vector3i::new(0, 5, 2);
+        assert_eq!(a.coord_min(b), Vector3i::new(0, 3, 2));
+        assert_eq!(a.coord_max(b), Vector3i::new(1, 5, 5));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let vector = Vector3i::default();
+        let expected_json = "{\"x\":0,\"y\":0,\"z\":0}";
+
+        crate::builtin::test_utils::roundtrip(&vector, expected_json);
+    }
 }

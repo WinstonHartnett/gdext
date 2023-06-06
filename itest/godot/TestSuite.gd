@@ -7,6 +7,12 @@ extends RefCounted
 
 var _assertion_failed: bool = false
 
+func print_newline():
+	printerr()
+
+func print_error(s: String):
+	push_error(s)
+
 ## Asserts that `what` is `true`, but does not abort the test. Returns `what` so you can return
 ## early from the test function if the assertion failed.
 func assert_that(what: bool, message: String = "") -> bool:
@@ -14,10 +20,12 @@ func assert_that(what: bool, message: String = "") -> bool:
 		return true
 
 	_assertion_failed = true
+
+	print_newline() # previous line not yet broken
 	if message:
-		print("assertion failed: %s" % message)
+		print_error("GDScript assertion failed:  %s" % message)
 	else:
-		print("assertion failed")
+		print_error("GDScript assertion failed.")
 	return false
 
 func assert_eq(left, right, message: String = "") -> bool:
@@ -25,8 +33,10 @@ func assert_eq(left, right, message: String = "") -> bool:
 		return true
 
 	_assertion_failed = true
+
+	print_newline() # previous line not yet broken
 	if message:
-		print("assertion failed: %s\n  left: %s\n right: %s" % [message, left, right])
+		print_error("GDScript assertion failed:  %s\n  left: %s\n right: %s" % [message, left, right])
 	else:
-		print("assertion failed: `(left == right)`\n  left: %s\n right: %s" % [left, right])
+		print_error("GDScript assertion failed:  `(left == right)`\n  left: %s\n right: %s" % [left, right])
 	return false

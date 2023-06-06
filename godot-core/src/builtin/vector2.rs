@@ -26,11 +26,13 @@ use super::{real, RAffine2, RVec2};
 /// vectors; use the gdext library with the `double-precision` feature in that case.
 ///
 /// See [`Vector2i`] for its integer counterpart.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vector2 {
     /// The vector's X component.
     pub x: real,
+
     /// The vector's Y component.
     pub y: real,
 }
@@ -310,21 +312,26 @@ impl_float_vector_fns!(Vector2, real);
 impl_vector_operators!(Vector2, real, (x, y));
 impl_vector_index!(Vector2, real, (x, y), Vector2Axis, (X, Y));
 
-impl GodotFfi for Vector2 {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector2 {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 /// Enumerates the axes in a [`Vector2`].
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 #[repr(i32)]
 pub enum Vector2Axis {
     /// The X axis.
     X,
+
     /// The Y axis.
     Y,
 }
 
-impl GodotFfi for Vector2Axis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector2Axis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -342,4 +349,36 @@ impl GlamType for RVec2 {
 
 impl GlamConv for Vector2 {
     type Glam = RVec2;
+}
+
+#[cfg(test)]
+mod test {
+    use crate::assert_eq_approx;
+
+    use super::*;
+
+    #[test]
+    fn coord_min_max() {
+        let a = Vector2::new(1.2, 3.4);
+        let b = Vector2::new(0.1, 5.6);
+        assert_eq_approx!(
+            a.coord_min(b),
+            Vector2::new(0.1, 3.4),
+            Vector2::is_equal_approx
+        );
+        assert_eq_approx!(
+            a.coord_max(b),
+            Vector2::new(1.2, 5.6),
+            Vector2::is_equal_approx
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let vector = Vector2::default();
+        let expected_json = "{\"x\":0.0,\"y\":0.0}";
+
+        crate::builtin::test_utils::roundtrip(&vector, expected_json);
+    }
 }

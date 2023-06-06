@@ -8,6 +8,7 @@ use godot_ffi as sys;
 
 use crate::builtin::meta::VariantMetadata;
 use crate::builtin::*;
+use crate::export::{Export, ExportInfo, TypeStringHint};
 use crate::obj::Share;
 use std::fmt;
 use std::marker::PhantomData;
@@ -22,11 +23,11 @@ use sys::{ffi_methods, interface_fn, GodotFfi};
 /// Godot's `Array` can be either typed or untyped.
 ///
 /// An untyped array can contain any kind of [`Variant`], even different types in the same array.
-/// We represent this in Rust as `Array`, which is just a type alias for `TypedArray<Variant>`.
+/// We represent this in Rust as `VariantArray`, which is just a type alias for `Array<Variant>`.
 ///
 /// Godot also supports typed arrays, which are also just `Variant` arrays under the hood, but with
 /// runtime checks that no values of the wrong type are put into the array. We represent this as
-/// `TypedArray<T>`, where the type `T` implements `VariantMetadata`, `FromVariant` and `ToVariant`.
+/// `Array<T>`, where the type `T` implements `VariantMetadata`, `FromVariant` and `ToVariant`.
 ///
 /// # Reference semantics
 ///
@@ -78,11 +79,17 @@ impl<T: VariantMetadata> Array<T> {
     }
 
     /// Returns the number of elements in the array. Equivalent of `size()` in Godot.
+    ///
+    /// Retrieving the size incurs an FFI call. If you know the size hasn't changed, you may consider storing
+    /// it in a variable. For loops, prefer iterators.
     pub fn len(&self) -> usize {
         to_usize(self.as_inner().size())
     }
 
     /// Returns `true` if the array is empty.
+    ///
+    /// Checking for emptiness incurs an FFI call. If you know the size hasn't changed, you may consider storing
+    /// it in a variable. For loops, prefer iterators.
     pub fn is_empty(&self) -> bool {
         self.as_inner().is_empty()
     }
@@ -150,10 +157,24 @@ impl<T: VariantMetadata> Array<T> {
     ///
     /// If `index` is out of bounds.
     fn ptr(&self, index: usize) -> *const Variant {
-        self.check_bounds(index);
+        let ptr = self.ptr_or_null(index);
+        assert!(
+            !ptr.is_null(),
+            "Array index {index} out of bounds (len {len})",
+            len = self.len(),
+        );
+        ptr
+    }
 
-        // SAFETY: We just checked that the index is not out of bounds.
-        unsafe { self.ptr_unchecked(index) }
+    /// Returns a pointer to the element at the given index, or null if out of bounds.
+    fn ptr_or_null(&self, index: usize) -> *const Variant {
+        // SAFETY: array_operator_index_const returns null for invalid indexes.
+        let variant_ptr = unsafe {
+            let index = to_i64(index);
+            interface_fn!(array_operator_index_const)(self.sys(), index)
+        };
+
+        Variant::ptr_from_sys(variant_ptr)
     }
 
     /// Returns a mutable pointer to the element at the given index.
@@ -162,29 +183,23 @@ impl<T: VariantMetadata> Array<T> {
     ///
     /// If `index` is out of bounds.
     fn ptr_mut(&self, index: usize) -> *mut Variant {
-        self.check_bounds(index);
-
-        // SAFETY: We just checked that the index is not out of bounds.
-        unsafe { self.ptr_mut_unchecked(index) }
+        let ptr = self.ptr_mut_or_null(index);
+        assert!(
+            !ptr.is_null(),
+            "Array index {index} out of bounds (len {len})",
+            len = self.len(),
+        );
+        ptr
     }
 
-    /// Returns a pointer to the element at the given index.
-    ///
-    /// # Safety
-    ///
-    /// Calling this with an out-of-bounds index is undefined behavior.
-    unsafe fn ptr_unchecked(&self, index: usize) -> *const Variant {
-        let variant_ptr = interface_fn!(array_operator_index_const)(self.sys(), to_i64(index));
-        Variant::ptr_from_sys(variant_ptr)
-    }
+    /// Returns a pointer to the element at the given index, or null if out of bounds.
+    fn ptr_mut_or_null(&self, index: usize) -> *mut Variant {
+        // SAFETY: array_operator_index returns null for invalid indexes.
+        let variant_ptr = unsafe {
+            let index = to_i64(index);
+            interface_fn!(array_operator_index)(self.sys(), index)
+        };
 
-    /// Returns a mutable pointer to the element at the given index.
-    ///
-    /// # Safety
-    ///
-    /// Calling this with an out-of-bounds index is undefined behavior.
-    unsafe fn ptr_mut_unchecked(&self, index: usize) -> *mut Variant {
-        let variant_ptr = interface_fn!(array_operator_index)(self.sys(), to_i64(index));
         Variant::ptr_from_sys_mut(variant_ptr)
     }
 
@@ -365,6 +380,7 @@ impl<T: VariantMetadata + FromVariant> Array<T> {
     ///
     /// If `index` is out of bounds.
     pub fn get(&self, index: usize) -> T {
+        // Panics on out-of-bounds
         let ptr = self.ptr(index);
 
         // SAFETY: `ptr()` just verified that the index is not out of bounds.
@@ -566,13 +582,32 @@ impl<T: VariantMetadata + ToVariant> Array<T> {
 //     ...
 // }
 
-impl<T: VariantMetadata> GodotFfi for Array<T> {
-    ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
+// SAFETY:
+// - `move_return_ptr`
+//   Nothing special needs to be done beyond a `std::mem::swap` when returning an Array.
+//   So we can just use `ffi_methods`.
+//
+// - `from_arg_ptr`
+//   Arrays are properly initialized through a `from_sys` call, but the ref-count should be incremented
+//   as that is the callee's responsibility. Which we do by calling `std::mem::forget(array.share())`.
+unsafe impl<T: VariantMetadata> GodotFfi for Array<T> {
+    ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque;
+        fn from_sys;
+        fn sys;
+        fn from_sys_init;
+        fn move_return_ptr;
+    }
 
     unsafe fn from_sys_init_default(init_fn: impl FnOnce(sys::GDExtensionTypePtr)) -> Self {
         let mut result = Self::default();
         init_fn(result.sys_mut());
         result
+    }
+
+    unsafe fn from_arg_ptr(ptr: sys::GDExtensionTypePtr, _call_type: sys::PtrcallType) -> Self {
+        let array = Self::from_sys(ptr);
+        std::mem::forget(array.share());
+        array
     }
 }
 
@@ -598,6 +633,36 @@ impl<T: VariantMetadata> Share for Array<T> {
             })
         };
         array.with_checked_type()
+    }
+}
+
+impl<T: VariantMetadata + TypeStringHint> TypeStringHint for Array<T> {
+    fn type_string() -> String {
+        format!("{}:{}", sys::VariantType::Array as i32, T::type_string())
+    }
+}
+
+impl<T: VariantMetadata + TypeStringHint> Export for Array<T> {
+    fn export(&self) -> Self {
+        self.share()
+    }
+
+    fn default_export_info() -> ExportInfo {
+        ExportInfo {
+            variant_type: Self::variant_type(),
+            hint: crate::engine::global::PropertyHint::PROPERTY_HINT_TYPE_STRING,
+            hint_string: T::type_string().into(),
+        }
+    }
+}
+
+impl Export for Array<Variant> {
+    fn export(&self) -> Self {
+        self.share()
+    }
+
+    fn default_export_info() -> ExportInfo {
+        ExportInfo::with_hint_none(Self::variant_type())
     }
 }
 
@@ -648,10 +713,11 @@ impl<T: VariantMetadata> ToVariant for Array<T> {
 impl<T: VariantMetadata> FromVariant for Array<T> {
     fn try_from_variant(variant: &Variant) -> Result<Self, VariantConversionError> {
         if variant.get_type() != Self::variant_type() {
-            return Err(VariantConversionError);
+            return Err(VariantConversionError::BadType);
         }
+
         let array = unsafe {
-            Self::from_sys_init_default(|self_ptr| {
+            sys::from_sys_init_or_init_default::<Self>(|self_ptr| {
                 let array_from_variant = sys::builtin_fn!(array_from_variant);
                 array_from_variant(self_ptr, variant.var_sys());
             })
@@ -677,9 +743,11 @@ impl<T: VariantMetadata + ToVariant> From<&[T]> for Array<T> {
             return array;
         }
         array.resize(len);
-        let ptr = array.ptr_mut(0);
+
+        let ptr = array.ptr_mut_or_null(0);
         for (i, element) in slice.iter().enumerate() {
             // SAFETY: The array contains exactly `len` elements, stored contiguously in memory.
+            // Also, the pointer is non-null, as we checked for emptiness above.
             unsafe {
                 *ptr.offset(to_isize(i)) = element.to_variant();
             }
@@ -742,10 +810,11 @@ impl<'a, T: VariantMetadata + FromVariant> Iterator for Iter<'a, T> {
         if self.next_idx < self.array.len() {
             let idx = self.next_idx;
             self.next_idx += 1;
-            // Using `ptr_unchecked` rather than going through `get()` so we can avoid a second
-            // bounds check.
-            // SAFETY: We just checked that the index is not out of bounds.
-            let variant = unsafe { &*self.array.ptr_unchecked(idx) };
+
+            let element_ptr = self.array.ptr_or_null(idx);
+
+            // SAFETY: We just checked that the index is not out of bounds, so the pointer won't be null.
+            let variant = unsafe { &*element_ptr };
             let element = T::from_variant(variant);
             Some(element)
         } else {
@@ -849,7 +918,7 @@ macro_rules! varray {
 /// [`set_typed`](https://docs.godotengine.org/en/latest/classes/class_array.html#class-array-method-set-typed).
 ///
 /// We ignore the `script` parameter because it has no impact on typing in Godot.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct TypeInfo {
     variant_type: VariantType,
     class_name: StringName,
@@ -858,12 +927,7 @@ struct TypeInfo {
 impl TypeInfo {
     fn new<T: VariantMetadata>() -> Self {
         let variant_type = T::variant_type();
-        let class_name = match variant_type {
-            VariantType::Object => StringName::from(T::class_name()),
-            // TODO for variant types other than Object, class_name() returns "(no base)"; just
-            // make it return "" instead?
-            _ => StringName::default(),
-        };
+        let class_name: StringName = T::class_name().into();
         Self {
             variant_type,
             class_name,
@@ -872,5 +936,18 @@ impl TypeInfo {
 
     fn is_typed(&self) -> bool {
         self.variant_type != VariantType::Nil
+    }
+}
+
+impl fmt::Debug for TypeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let class = self.class_name.to_string();
+        let class_str = if class.is_empty() {
+            String::new()
+        } else {
+            format!(" (class={class})")
+        };
+
+        write!(f, "{:?}{}", self.variant_type, class_str)
     }
 }

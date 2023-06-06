@@ -15,6 +15,7 @@ use super::{real, RQuat};
 use super::{Basis, EulerOrder};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Quaternion {
     pub x: real,
@@ -180,7 +181,7 @@ impl Quaternion {
     }
 
     // pub fn spherical_cubic_interpolate(self, b: Self, pre_a: Self, post_b: Self, weight: real) -> Self {}
-    // TODO: Implement godot's function in rust
+    // TODO: Implement godot's function in Rust
     /*
         pub fn spherical_cubic_interpolate_in_time(
             self,
@@ -254,7 +255,9 @@ impl Mul<Quaternion> for Quaternion {
     }
 }
 
-impl GodotFfi for Quaternion {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Quaternion {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -343,5 +346,17 @@ impl Neg for Quaternion {
 
     fn neg(self) -> Self {
         Self::new(-self.x, -self.y, -self.z, -self.w)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let quaternion = super::Quaternion::new(1.0, 1.0, 1.0, 1.0);
+        let expected_json = "{\"x\":1.0,\"y\":1.0,\"z\":1.0,\"w\":1.0}";
+
+        crate::builtin::test_utils::roundtrip(&quaternion, expected_json);
     }
 }

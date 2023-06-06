@@ -7,17 +7,31 @@
 mod registry;
 mod storage;
 
-pub mod bind;
 pub mod builder;
 pub mod builtin;
+pub mod export;
 pub mod init;
 pub mod log;
 pub mod macros;
+pub mod native_structure;
 pub mod obj;
 
 pub use godot_ffi as sys;
+#[doc(hidden)]
+pub use godot_ffi::out;
 pub use registry::*;
 
+/// Maps the Godot class API to Rust.
+///
+/// This module contains the following symbols:
+/// * Classes: `CanvasItem`, etc.
+/// * Virtual traits: `CanvasItemVirtual`, etc.
+/// * Enum/flag modules: `canvas_item`, etc.
+///
+/// Noteworthy sub-modules are:
+/// * [`notify`][crate::engine::notify]: all notification types, used when working with the virtual callback to handle lifecycle notifications.
+/// * [`global`][crate::engine::global]: global enums not belonging to a specific class.
+/// * [`utilities`][crate::engine::utilities]: utility methods that are global in Godot.
 pub mod engine;
 
 // Output of generated code. Mimics the file structure, symbols are re-exported.
@@ -32,6 +46,8 @@ pub mod private {
     // If someone forgets #[godot_api], this causes a compile error, rather than virtual functions not being called at runtime.
     #[allow(non_camel_case_types)]
     pub trait You_forgot_the_attribute__godot_api {}
+
+    use std::sync::{Arc, Mutex};
 
     pub use crate::gen::classes::class_macros;
     pub use crate::registry::{callbacks, ClassPlugin, ErasedRegisterFn, PluginComponent};
@@ -50,12 +66,29 @@ pub mod private {
 
     fn print_panic(err: Box<dyn std::any::Any + Send>) {
         if let Some(s) = err.downcast_ref::<&'static str>() {
-            log::godot_error!("Panic msg:  {s}");
+            print_panic_message(s);
         } else if let Some(s) = err.downcast_ref::<String>() {
-            log::godot_error!("Panic msg:  {s}");
+            print_panic_message(s.as_str());
         } else {
             log::godot_error!("Rust panic of type ID {:?}", err.type_id());
         }
+    }
+
+    fn print_panic_message(msg: &str) {
+        // If the message contains newlines, print all of the lines after a line break, and indent them.
+        let lbegin = "\n  ";
+        let indented = msg.replace('\n', lbegin);
+
+        if indented.len() != msg.len() {
+            log::godot_error!("Panic msg:{lbegin}{indented}");
+        } else {
+            log::godot_error!("Panic msg:  {msg}");
+        }
+    }
+
+    struct GodotPanicInfo {
+        line: u32,
+        file: String,
     }
 
     /// Executes `code`. If a panic is thrown, it is caught and an error message is printed to Godot.
@@ -67,30 +100,87 @@ pub mod private {
         F: FnOnce() -> R + std::panic::UnwindSafe,
         S: std::fmt::Display,
     {
-        match std::panic::catch_unwind(code) {
+        let info: Arc<Mutex<Option<GodotPanicInfo>>> = Arc::new(Mutex::new(None));
+
+        // Back up previous hook, set new one
+        let prev_hook = std::panic::take_hook();
+        {
+            let info = info.clone();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                if let Some(location) = panic_info.location() {
+                    *info.lock().unwrap() = Some(GodotPanicInfo {
+                        file: location.file().to_string(),
+                        line: location.line(),
+                    });
+                } else {
+                    println!("panic occurred but can't get location information...");
+                }
+            }));
+        }
+
+        // Run code that should panic, restore hook
+        let panic = std::panic::catch_unwind(code);
+        std::panic::set_hook(prev_hook);
+
+        match panic {
             Ok(result) => Some(result),
             Err(err) => {
-                log::godot_error!("Rust function panicked. Context: {}", error_context());
+                // Flush, to make sure previous Rust output (e.g. test announcement, or debug prints during app) have been printed
+                // TODO write custom panic handler and move this there, before panic backtrace printing
+                flush_stdout();
+
+                let guard = info.lock().unwrap();
+                let info = guard.as_ref().expect("no panic info available");
+                log::godot_error!(
+                    "Rust function panicked in file {} at line {}. Context: {}",
+                    info.file,
+                    info.line,
+                    error_context()
+                );
                 print_panic(err);
                 None
             }
         }
     }
+
+    pub fn flush_stdout() {
+        use std::io::Write;
+        std::io::stdout().flush().expect("flush stdout");
+    }
 }
 
-#[cfg(feature = "trace")]
-#[macro_export]
-macro_rules! out {
-    ()                          => (eprintln!());
-    ($fmt:literal)              => (eprintln!($fmt));
-    ($fmt:literal, $($arg:tt)*) => (eprintln!($fmt, $($arg)*));
+macro_rules! generate_gdextension_api_version {
+    (
+        $(
+            ($name:ident, $gdextension_api:ident) => {
+                $($version:literal, )*
+            }
+        ),* $(,)?
+    ) => {
+        $(
+            $(
+                #[cfg($gdextension_api = $version)]
+                #[allow(dead_code)]
+                const $name: &str = $version;
+            )*
+        )*
+    };
 }
 
-#[cfg(not(feature = "trace"))]
-// TODO find a better way than sink-writing to avoid warnings, #[allow(unused_variables)] doesn't work
-#[macro_export]
-macro_rules! out {
-    ()                          => ({});
-    ($fmt:literal)              => ({ use std::io::{sink, Write}; let _ = write!(sink(), $fmt); });
-    ($fmt:literal, $($arg:tt)*) => ({ use std::io::{sink, Write}; let _ = write!(sink(), $fmt, $($arg)*); };)
-}
+// If multiple gdextension_api_version's are found then this will generate several structs with the same
+// name, causing a compile error.
+//
+// This includes all versions we're developing for, including unreleased future versions.
+generate_gdextension_api_version!(
+    (GDEXTENSION_EXACT_API, gdextension_exact_api) => {
+        "4.0",
+        "4.0.1",
+        "4.0.2",
+        "4.0.3",
+        "4.1",
+    },
+    (GDEXTENSION_API, gdextension_api) => {
+        "4.0",
+        "4.1",
+    },
+);

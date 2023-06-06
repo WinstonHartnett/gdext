@@ -4,19 +4,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 use std::rc::Rc;
 
-use godot::bind::{godot_api, GodotClass, GodotExt};
+use godot::bind::{godot_api, GodotClass};
 use godot::builtin::{
     FromVariant, GodotString, StringName, ToVariant, Variant, VariantConversionError, Vector3,
 };
 use godot::engine::node::InternalMode;
-use godot::engine::{file_access, Area2D, Camera3D, FileAccess, Node, Node3D, Object, RefCounted};
+use godot::engine::{
+    file_access, Area2D, Camera3D, FileAccess, Node, Node3D, Object, RefCounted, RefCountedVirtual,
+};
 use godot::obj::{Base, Gd, InstanceId};
 use godot::obj::{Inherits, Share};
-use godot::sys::GodotFfi;
+use godot::sys::{self, GodotFfi};
 
 use crate::{expect_panic, itest, TestContext};
 
@@ -92,8 +94,11 @@ fn object_user_roundtrip_write() {
     let obj: Gd<ObjPayload> = Gd::new(user);
     assert_eq!(obj.bind().value, value);
 
-    let obj2 = unsafe { Gd::<ObjPayload>::from_sys_init(|ptr| obj.write_sys(ptr)) };
-    std::mem::forget(obj);
+    let obj2 = unsafe {
+        Gd::<ObjPayload>::from_sys_init(|ptr| {
+            obj.move_return_ptr(sys::AsUninit::force_init(ptr), sys::PtrcallType::Standard)
+        })
+    };
     assert_eq!(obj2.bind().value, value);
 } // drop
 
@@ -113,7 +118,17 @@ fn object_engine_roundtrip() {
 }
 
 #[itest]
-fn object_display() {
+fn object_user_display() {
+    let obj = Gd::new(ObjPayload { value: 774 });
+
+    let actual = format!(".:{obj}:.");
+    let expected = ".:value=774:.".to_string();
+
+    assert_eq!(actual, expected);
+}
+
+#[itest]
+fn object_engine_display() {
     let obj = Node3D::new_alloc();
     let id = obj.instance_id();
 
@@ -323,7 +338,7 @@ fn object_engine_convert_variant_nil() {
 
     assert_eq!(
         Gd::<Area2D>::try_from_variant(&nil),
-        Err(VariantConversionError),
+        Err(VariantConversionError::BadType),
         "try_from_variant(&nil)"
     );
 
@@ -411,6 +426,36 @@ fn object_engine_downcast() {
     assert_eq!(node3d.get_position(), pos);
 
     node3d.free();
+}
+
+#[derive(GodotClass)]
+struct CustomClassA {}
+
+#[derive(GodotClass)]
+struct CustomClassB {}
+
+#[itest]
+fn object_reject_invalid_downcast() {
+    let a_instance = Gd::new(CustomClassA {});
+    let b_instance = Gd::new(CustomClassB {});
+
+    let a_obj = a_instance.upcast::<Object>();
+    let b_obj = b_instance.upcast::<Object>();
+
+    assert!(a_obj.try_cast::<CustomClassB>().is_none());
+    assert!(b_obj.try_cast::<CustomClassA>().is_none());
+}
+
+#[itest]
+fn variant_reject_invalid_downcast() {
+    let a_instance = Gd::new(CustomClassA {}).to_variant();
+    let b_instance = Gd::new(CustomClassB {}).to_variant();
+
+    assert!(a_instance.try_to::<Gd<CustomClassB>>().is_err());
+    assert!(b_instance.try_to::<Gd<CustomClassA>>().is_err());
+
+    assert!(a_instance.try_to::<Gd<CustomClassA>>().is_ok());
+    assert!(b_instance.try_to::<Gd<CustomClassB>>().is_ok());
 }
 
 #[itest]
@@ -628,28 +673,186 @@ fn user_object() -> Gd<ObjPayload> {
     Gd::new(user)
 }
 
-#[derive(GodotClass, Debug, Eq, PartialEq)]
-//#[class(init)]
+#[derive(GodotClass, Eq, PartialEq, Debug)]
 pub struct ObjPayload {
     value: i16,
 }
 
 #[godot_api]
-impl GodotExt for ObjPayload {
+impl RefCountedVirtual for ObjPayload {
     fn init(_base: Base<Self::Base>) -> Self {
         Self { value: 111 }
+    }
+
+    fn to_string(&self) -> GodotString {
+        format!("value={}", self.value).into()
     }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
-#[derive(GodotClass, Debug, Eq, PartialEq)]
+#[derive(GodotClass, Eq, PartialEq, Debug)]
 pub struct Tracker {
     drop_count: Rc<RefCell<i32>>,
 }
+
 impl Drop for Tracker {
     fn drop(&mut self) {
         //println!("      Tracker::drop");
         *self.drop_count.borrow_mut() += 1;
     }
+}
+
+pub mod object_test_gd {
+    use godot::prelude::*;
+
+    #[derive(GodotClass)]
+    #[class(init, base=Object)]
+    struct MockObjRust {
+        #[export]
+        i: i64,
+    }
+
+    #[godot_api]
+    impl MockObjRust {}
+
+    #[derive(GodotClass)]
+    #[class(init, base=RefCounted)]
+    struct MockRefCountedRust {
+        #[export]
+        i: i64,
+    }
+
+    #[godot_api]
+    impl MockRefCountedRust {}
+
+    #[derive(GodotClass, Debug)]
+    #[class(init, base=RefCounted)]
+    struct ObjectTest;
+
+    #[godot_api]
+    impl ObjectTest {
+        #[func]
+        fn pass_object(&self, object: Gd<Object>) -> i64 {
+            let i = object.get("i".into()).to();
+            object.free();
+            i
+        }
+
+        #[func]
+        fn return_object(&self) -> Gd<Object> {
+            Gd::new(MockObjRust { i: 42 }).upcast()
+        }
+
+        #[func]
+        fn pass_refcounted(&self, object: Gd<RefCounted>) -> i64 {
+            object.get("i".into()).to()
+        }
+
+        #[func]
+        fn pass_refcounted_as_object(&self, object: Gd<Object>) -> i64 {
+            object.get("i".into()).to()
+        }
+
+        #[func]
+        fn return_refcounted(&self) -> Gd<RefCounted> {
+            Gd::new(MockRefCountedRust { i: 42 }).upcast()
+        }
+
+        #[func]
+        fn return_refcounted_as_object(&self) -> Gd<Object> {
+            Gd::new(MockRefCountedRust { i: 42 }).upcast()
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------------------------------------------------------------
+
+    #[derive(GodotClass)]
+    #[class(base=Object)]
+    pub struct CustomConstructor {
+        #[base]
+        base: Base<Object>,
+
+        #[export]
+        pub val: i64,
+    }
+
+    #[godot_api]
+    impl CustomConstructor {
+        #[func]
+        pub fn construct_object(val: i64) -> Gd<CustomConstructor> {
+            Gd::with_base(|base| Self { base, val })
+        }
+    }
+}
+
+#[itest]
+fn custom_constructor_works() {
+    let obj = object_test_gd::CustomConstructor::construct_object(42);
+    assert_eq!(obj.bind().val, 42);
+    obj.free();
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+struct DoubleUse {
+    #[base]
+    base: Base<Object>,
+
+    used: Cell<bool>,
+}
+
+#[godot_api]
+impl DoubleUse {
+    #[func]
+    fn use_1(&self) {
+        self.used.set(true);
+    }
+}
+
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+struct SignalEmitter {
+    #[base]
+    base: Base<Object>,
+}
+
+#[godot_api]
+impl SignalEmitter {
+    #[signal]
+    fn do_use();
+}
+
+#[itest]
+/// Test that godot can call a method that takes `&self`, while there already exists an immutable reference
+/// to that type acquired through `bind`.
+///
+/// This test is not signal-specific, the original bug would happen whenever godot would call a method that
+/// takes `&self`. However this was the easiest way to test the bug i could find.
+fn double_use_reference() {
+    let double_use: Gd<DoubleUse> = Gd::new_default();
+    let emitter: Gd<SignalEmitter> = Gd::new_default();
+
+    emitter
+        .share()
+        .upcast::<Object>()
+        .connect("do_use".into(), double_use.callable("use_1"), 0);
+
+    let guard = double_use.bind();
+
+    assert!(!guard.used.get());
+
+    emitter
+        .share()
+        .upcast::<Object>()
+        .emit_signal("do_use".into(), &[]);
+
+    assert!(guard.used.get(), "use_1 was not called");
+
+    std::mem::drop(guard);
+
+    double_use.free();
+    emitter.free();
 }

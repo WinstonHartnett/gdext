@@ -8,8 +8,6 @@
 #![allow(dead_code)]
 #![allow(clippy::question_mark)] // in #[derive(DeJson)]
 
-use crate::{godot_exe, StopWatch};
-
 use nanoserde::DeJson;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -17,12 +15,24 @@ use nanoserde::DeJson;
 
 #[derive(DeJson)]
 pub struct ExtensionApi {
+    pub header: Header,
     pub builtin_class_sizes: Vec<ClassSizes>,
     pub builtin_classes: Vec<BuiltinClass>,
     pub classes: Vec<Class>,
     pub global_enums: Vec<Enum>,
     pub utility_functions: Vec<UtilityFunction>,
+    pub native_structures: Vec<NativeStructure>,
     pub singletons: Vec<Singleton>,
+}
+
+#[derive(DeJson, Clone, Debug)]
+pub struct Header {
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub version_patch: u8,
+    pub version_status: String,
+    pub version_build: String,
+    pub version_full_name: String,
 }
 
 #[derive(DeJson)]
@@ -43,7 +53,7 @@ pub struct BuiltinClass {
     pub indexing_return_type: Option<String>,
     pub is_keyed: bool,
     pub members: Option<Vec<Member>>,
-    pub constants: Option<Vec<Constant>>,
+    // pub constants: Option<Vec<BuiltinConstant>>,
     pub enums: Option<Vec<BuiltinClassEnum>>, // no bitfield
     pub operators: Vec<Operator>,
     pub methods: Option<Vec<BuiltinClassMethod>>,
@@ -58,11 +68,17 @@ pub struct Class {
     pub is_instantiable: bool,
     pub inherits: Option<String>,
     // pub api_type: String,
-    // pub constants: Option<Vec<Constant>>,
+    pub constants: Option<Vec<ClassConstant>>,
     pub enums: Option<Vec<Enum>>,
     pub methods: Option<Vec<ClassMethod>>,
     // pub properties: Option<Vec<Property>>,
     // pub signals: Option<Vec<Signal>>,
+}
+
+#[derive(DeJson)]
+pub struct NativeStructure {
+    pub name: String,
+    pub format: String,
 }
 
 #[derive(DeJson)]
@@ -102,13 +118,18 @@ pub struct EnumConstant {
     pub value: i32,
 }
 
+pub type ClassConstant = EnumConstant;
+
+/*
+// Constants of builtin types have a string value like "Vector2(1, 1)", hence also a type field
 #[derive(DeJson)]
-pub struct Constant {
+pub struct BuiltinConstant {
     pub name: String,
     #[nserde(rename = "type")]
     pub type_: String,
     pub value: String,
 }
+*/
 
 #[derive(DeJson)]
 pub struct Operator {
@@ -167,7 +188,7 @@ pub struct BuiltinClassMethod {
     pub arguments: Option<Vec<MethodArg>>,
 }
 
-#[derive(DeJson)]
+#[derive(DeJson, Clone)]
 pub struct ClassMethod {
     pub name: String,
     pub is_const: bool,
@@ -200,7 +221,7 @@ pub struct MethodArg {
 }
 
 // Example: get_available_point_id -> {type: "int", meta: "int64"}
-#[derive(DeJson)]
+#[derive(DeJson, Clone)]
 pub struct MethodReturn {
     #[nserde(rename = "type")]
     pub type_: String,
@@ -218,7 +239,7 @@ impl MethodReturn {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Implementation
 
-pub fn load_extension_api(watch: &mut StopWatch) -> (ExtensionApi, &'static str) {
+pub fn load_extension_api(watch: &mut godot_bindings::StopWatch) -> (ExtensionApi, &'static str) {
     // For float/double inference, see:
     // * https://github.com/godotengine/godot-proposals/issues/892
     // * https://github.com/godotengine/godot-cpp/pull/728
@@ -227,10 +248,18 @@ pub fn load_extension_api(watch: &mut StopWatch) -> (ExtensionApi, &'static str)
     #[cfg(not(feature = "double-precision"))]
     let build_config = "float_64"; // TODO infer this
 
-    let json: String = godot_exe::load_extension_api_json(watch);
+    // Use type inference, so we can accept both String (dynamically resolved) and &str (prebuilt).
+    // #[allow]: as_ref() acts as impl AsRef<str>, but with conditional compilation
 
-    let model: ExtensionApi = DeJson::deserialize_json(&json).expect("failed to deserialize JSON");
+    let json = godot_bindings::load_gdextension_json(watch);
+    #[allow(clippy::useless_asref)]
+    let json_str: &str = json.as_ref();
+
+    let model: ExtensionApi =
+        DeJson::deserialize_json(json_str).expect("failed to deserialize JSON");
     watch.record("deserialize_json");
+
+    println!("Parsed extension_api.json for version {:?}", model.header);
 
     (model, build_config)
 }

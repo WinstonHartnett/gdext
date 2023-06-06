@@ -5,58 +5,61 @@
  */
 
 #[macro_export]
-macro_rules! godot_warn {
-    ($fmt:literal $(, $args:expr)* $(,)?) => {
+#[doc(hidden)]
+macro_rules! inner_godot_msg {
+    // FIXME expr needs to be parenthesised, see usages
+    ($godot_fn:ident; $fmt:literal $(, $args:expr)* $(,)?) => {
+    //($($args:tt),* $(,)?) => {
         unsafe {
             let msg = format!("{}\0", format_args!($fmt $(, $args)*));
+            assert!(msg.is_ascii(), "godot_error: message must be ASCII");
 
-            $crate::sys::interface_fn!(print_warning)(
-                msg.as_bytes().as_ptr() as *const _,
-                "<function unset>\0".as_bytes().as_ptr() as *const _,
-                concat!(file!(), "\0").as_ptr() as *const _,
-                line!() as _,
-                false as $crate::sys::GDExtensionBool, // whether to create a toast notification in editor
-            );
+            // Check whether engine is loaded, otherwise fall back to stderr.
+            if $crate::sys::is_initialized() {
+                $crate::sys::interface_fn!($godot_fn)(
+                    $crate::sys::c_str_from_str(&msg),
+                    $crate::sys::c_str(b"<function unset>\0"),
+                    $crate::sys::c_str_from_str(concat!(file!(), "\0")),
+                    line!() as i32,
+                    false as $crate::sys::GDExtensionBool, // whether to create a toast notification in editor
+                );
+            } else {
+                eprintln!("[{}] {}", stringify!($godot_fn), &msg[..msg.len() - 1]);
+            }
         }
     };
 }
 
+/// Pushes a warning message to Godot's built-in debugger and to the OS terminal.
+///
+/// _Godot equivalent: @GlobalScope.push_warning()_
+#[macro_export]
+macro_rules! godot_warn {
+    ($fmt:literal $(, $args:expr)* $(,)?) => {
+        $crate::inner_godot_msg!(print_warning; $fmt $(, $args)*);
+    };
+}
+
+/// Pushes an error message to Godot's built-in debugger and to the OS terminal.
+///
+/// _Godot equivalent: @GlobalScope.push_error()_
 #[macro_export]
 macro_rules! godot_error {
-    // FIXME expr needs to be parenthesised, see usages
     ($fmt:literal $(, $args:expr)* $(,)?) => {
-    //($($args:tt),* $(,)?) => {
-        unsafe {
-            let msg = format!("{}\0", format_args!($fmt $(, $args)*));
-
-            $crate::sys::interface_fn!(print_error)(
-                msg.as_bytes().as_ptr() as *const _,
-                "<function unset>\0".as_bytes().as_ptr() as *const _,
-                concat!(file!(), "\0").as_ptr() as *const _,
-                line!() as _,
-                false as $crate::sys::GDExtensionBool, // whether to create a toast notification in editor
-            );
-        }
+        $crate::inner_godot_msg!(print_error; $fmt $(, $args)*);
     };
 }
 
 #[macro_export]
 macro_rules! godot_script_error {
     ($fmt:literal $(, $args:expr)* $(,)?) => {
-        unsafe {
-            let msg = format!("{}\0", format_args!($fmt $(, $args)*));
-
-            $crate::sys::interface_fn!(print_script_error)(
-                msg.as_bytes().as_ptr() as *const _,
-                "<function unset>\0".as_bytes().as_ptr() as *const _,
-                concat!(file!(), "\0").as_ptr() as *const _,
-                line!() as _,
-                false as $crate::sys::GDExtensionBool, // whether to create a toast notification in editor
-            );
-        }
+        $crate::inner_godot_msg!(print_script_error; $fmt $(, $args)*);
     };
 }
 
+/// Prints to the Godot console.
+///
+/// _Godot equivalent: @GlobalScope.print()_
 #[macro_export]
 macro_rules! godot_print {
     ($fmt:literal $(, $args:expr)* $(,)?) => {
@@ -75,6 +78,7 @@ pub use crate::{godot_error, godot_print, godot_script_error, godot_warn};
 use crate::builtin::{StringName, Variant};
 use crate::sys::{self, GodotFfi};
 
+/// Prints to the Godot console, used by the godot_print! macro.
 pub fn print(varargs: &[Variant]) {
     unsafe {
         let method_name = StringName::from("print");

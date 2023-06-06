@@ -4,15 +4,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Rust bindings for GDExtension, the extension API of [Godot](https://godotengine.org/) 4.
+//! The **gdext** library implements Rust bindings for GDExtension, the C API of [Godot 4](https://godotengine.org).
 //!
 //! This documentation is a work in progress.
 //!
-//! # Kinds of types
+//! # Type categories
 //!
 //! Godot is written in C++, which doesn't have the same strict guarantees about safety and
 //! mutability that Rust does. As a result, not everything in this crate will look and feel
-//! entirely "Rusty". We distinguish four different kinds of types:
+//! entirely "rusty". We distinguish four different kinds of types:
 //!
 //! 1. **Value types**: `i64`, `f64`, and mathematical types like
 //!    [`Vector2`][crate::builtin::Vector2] and [`Color`][crate::builtin::Color].
@@ -59,10 +59,9 @@
 //!
 //! # Ergonomics and panics
 //!
-//! The GDExtension Rust bindings are designed with usage ergonomics in mind, making them viable
-//! for fast prototyping. Part of this design means that users should not constantly be forced
-//! to write code such as `obj.cast::<T>().unwrap()`. Instead, they can just write `obj.cast::<T>()`,
-//! which may panic at runtime.
+//! gdext is designed with usage ergonomics in mind, making it viable for fast prototyping.
+//! Part of this design means that users should not constantly be forced to write code such as
+//! `obj.cast::<T>().unwrap()`. Instead, they can just write `obj.cast::<T>()`, which may panic at runtime.
 //!
 //! This approach has several advantages:
 //! * The code is more concise and less cluttered.
@@ -93,11 +92,53 @@
 //! appropriate, but the Rust compiler cannot check what happens to an object through C++ or
 //! GDScript.
 //!
-//! As a rule of thumb, if you must use threading, prefer to use Rust threads instead of Godot
-//! threads.
+//! As a rule of thumb, if you must use threading, prefer to use [Rust threads](https://doc.rust-lang.org/std/thread)
+//! over Godot threads.
+//!
+//! The Cargo feature `threads` provides experimental support for multithreading. The underlying safety
+//! rules are still being worked out, as such you may encounter unsoundness and an unstable API.
+//!
+//! # Cargo features
+//!
+//! The following features can be enabled for this crate. All off them are off by default.
+//!
+//! * **`formatted`**
+//!
+//!   Format the generated bindings with `rustfmt`. This significantly increases initial compile times and is
+//!   mostly useful when you actively contribute to the library and/or want to inspect generated files.<br><br>
+//!
+//! * **`double-precision`**
+//!
+//!   Use `f64` instead of `f32` for the floating-point type [`real`][type@builtin::real]. Requires Godot to be compiled with the
+//!   scons flag `precision=double`.<br><br>
+//!
+//! * **`custom-godot`**
+//!
+//!   Use a custom Godot build instead of the latest official release. This is useful when you like to use a
+//!   version compiled yourself, with custom flags.
+//!
+//!   If you simply want to use a different official release, use this pattern instead (here e.g. for version `4.0`):
+//!   ```toml
+//!   # Trick Cargo into seeing a different URL; https://github.com/rust-lang/cargo/issues/5478
+//!   [patch."https://github.com/godot-rust/godot4-prebuilt"]
+//!   godot4-prebuilt = { git = "https://github.com//godot-rust/godot4-prebuilt", branch = "4.0"}
+//!   ```
+//!   <br>
+//!
+//! * **`serde`**
+//!
+//!   Implement the [serde](https://docs.rs/serde) traits `Serialize` and `Deserialize` traits for certain built-in types.
+//!   The serialized representation underlies **no stability guarantees** and may change at any time, even without a SemVer-breaking change.
+//!   <br><br>
+//!
+//! * **`threads`**
+//!
+//!   Experimental threading support. This enables `Send`/`Sync` traits for `Gd<T>` and makes the guard types `Gd`/`GdMut` aware of
+//!   multi-threaded references. The safety aspects of this are not ironed out yet; use at your own risk. The API may also change
+//!   at any time.
 
 #[doc(inline)]
-pub use godot_core::{builtin, engine, log, obj, sys};
+pub use godot_core::{builtin, engine, export, log, native_structure, obj, sys};
 
 /// Facilities for initializing and terminating the GDExtension library.
 pub mod init {
@@ -109,10 +150,8 @@ pub mod init {
 
 /// Export user-defined classes and methods to be called by the engine.
 pub mod bind {
-    pub use godot_core::bind::*;
-
-    // Re-exports
-    pub use godot_macros::{godot_api, GodotClass};
+    pub use super::export::{Export, TypeStringHint};
+    pub use godot_macros::{godot_api, FromVariant, GodotClass, ToVariant};
 }
 
 /// Testing facilities (unstable).
@@ -126,12 +165,14 @@ pub use godot_core::private;
 
 /// Often-imported symbols.
 pub mod prelude {
-    pub use super::bind::{godot_api, GodotClass, GodotExt};
+    pub use super::bind::{godot_api, Export, FromVariant, GodotClass, ToVariant, TypeStringHint};
     pub use super::builtin::*;
     pub use super::builtin::{array, dict, varray}; // Re-export macros.
     pub use super::engine::{
-        load, try_load, utilities, AudioStreamPlayer, Camera2D, Camera3D, Input, Node, Node2D,
-        Node3D, Object, PackedScene, RefCounted, Resource, SceneTree,
+        load, try_load, utilities, AudioStreamPlayer, AudioStreamPlayerVirtual, Camera2D,
+        Camera2DVirtual, Camera3D, Camera3DVirtual, Input, Node, Node2D, Node2DVirtual, Node3D,
+        Node3DVirtual, NodeVirtual, Object, ObjectVirtual, PackedScene, PackedSceneVirtual,
+        RefCounted, RefCountedVirtual, Resource, ResourceVirtual, SceneTree, SceneTreeVirtual,
     };
     pub use super::init::{gdextension, ExtensionLayer, ExtensionLibrary, InitHandle, InitLevel};
     pub use super::log::*;

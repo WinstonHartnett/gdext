@@ -254,7 +254,12 @@ fn variant_sys_conversion2() {
     let mut buffer = [0u8; 50];
 
     let v = Variant::from(7);
-    unsafe { v.write_sys(buffer.as_mut_ptr() as sys::GDExtensionTypePtr) };
+    unsafe {
+        v.clone().move_return_ptr(
+            buffer.as_mut_ptr() as sys::GDExtensionTypePtr,
+            sys::PtrcallType::Standard,
+        )
+    };
 
     let v2 = unsafe {
         Variant::from_sys_init(|ptr| {
@@ -292,20 +297,23 @@ fn variant_null_object_is_nil() {
 fn variant_conversion_fails() {
     assert_eq!(
         "hello".to_variant().try_to::<i64>(),
-        Err(VariantConversionError)
+        Err(VariantConversionError::BadType)
     );
-    assert_eq!(28.to_variant().try_to::<f32>(), Err(VariantConversionError));
+    assert_eq!(
+        28.to_variant().try_to::<f32>(),
+        Err(VariantConversionError::BadType)
+    );
     assert_eq!(
         10.to_variant().try_to::<bool>(),
-        Err(VariantConversionError)
+        Err(VariantConversionError::BadType)
     );
     assert_eq!(
         false.to_variant().try_to::<String>(),
-        Err(VariantConversionError)
+        Err(VariantConversionError::BadType)
     );
     assert_eq!(
         VariantArray::default().to_variant().try_to::<StringName>(),
-        Err(VariantConversionError)
+        Err(VariantConversionError::BadType)
     );
     //assert_eq!(
     //    Dictionary::default().to_variant().try_to::<Array>(),
@@ -313,7 +321,7 @@ fn variant_conversion_fails() {
     //);
     assert_eq!(
         Variant::nil().to_variant().try_to::<Dictionary>(),
-        Err(VariantConversionError)
+        Err(VariantConversionError::BadType)
     );
 }
 

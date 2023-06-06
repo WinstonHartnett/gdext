@@ -10,7 +10,7 @@ use sys::{ffi_methods, GodotFfi};
 
 use super::glam_helpers::{GlamConv, GlamType};
 use super::{real, RAffine3};
-use super::{Basis, Projection, Vector3};
+use super::{Aabb, Basis, Plane, Projection, Vector3};
 
 /// Affine 3D transform (3x4 matrix).
 ///
@@ -24,6 +24,7 @@ use super::{Basis, Projection, Vector3};
 /// [ a.z  b.z  c.z  o.z ]
 /// ```
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Transform3D {
     /// The basis is a matrix containing 3 vectors as its columns. They can be
@@ -144,10 +145,19 @@ impl Transform3D {
     /// See [`Basis::new_looking_at()`] for more information.
     ///
     /// _Godot equivalent: Transform3D.looking_at()_
+    #[cfg(gdextension_api = "4.0")]
     #[must_use]
     pub fn looking_at(self, target: Vector3, up: Vector3) -> Self {
         Self {
             basis: Basis::new_looking_at(target - self.origin, up),
+            origin: self.origin,
+        }
+    }
+    #[cfg(not(gdextension_api = "4.0"))]
+    #[must_use]
+    pub fn looking_at(self, target: Vector3, up: Vector3, use_model_front: bool) -> Self {
+        Self {
+            basis: Basis::new_looking_at(target - self.origin, up, use_model_front),
             origin: self.origin,
         }
     }
@@ -295,6 +305,46 @@ impl Mul<real> for Transform3D {
     }
 }
 
+impl Mul<Aabb> for Transform3D {
+    type Output = Aabb;
+
+    /// Transforms each coordinate in `rhs.position` and `rhs.end()` individually by this transform, then
+    /// creates an `Aabb` containing all of them.
+    fn mul(self, rhs: Aabb) -> Self::Output {
+        // https://web.archive.org/web/20220317024830/https://dev.theomader.com/transform-bounding-boxes/
+        let xa = self.basis.col_a() * rhs.position.x;
+        let xb = self.basis.col_a() * rhs.end().x;
+
+        let ya = self.basis.col_b() * rhs.position.y;
+        let yb = self.basis.col_b() * rhs.end().y;
+
+        let za = self.basis.col_c() * rhs.position.z;
+        let zb = self.basis.col_c() * rhs.end().z;
+
+        let position = Vector3::coord_min(xa, xb)
+            + Vector3::coord_min(ya, yb)
+            + Vector3::coord_min(za, zb)
+            + self.origin;
+        let end = Vector3::coord_max(xa, xb)
+            + Vector3::coord_max(ya, yb)
+            + Vector3::coord_max(za, zb)
+            + self.origin;
+        Aabb::new(position, end - position)
+    }
+}
+
+impl Mul<Plane> for Transform3D {
+    type Output = Plane;
+
+    fn mul(self, rhs: Plane) -> Self::Output {
+        let point = self * (rhs.normal * rhs.d);
+
+        let basis = self.basis.inverse().transposed();
+
+        Plane::from_point_normal(point, (basis * rhs.normal).normalized())
+    }
+}
+
 impl GlamType for RAffine3 {
     type Mapped = Transform3D;
 
@@ -317,7 +367,9 @@ impl GlamConv for Transform3D {
     type Glam = RAffine3;
 }
 
-impl GodotFfi for Transform3D {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Transform3D {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -416,5 +468,14 @@ mod test {
             !Transform3D::new(infinite_basis, infinite_vec).is_finite(),
             "Transform3D with two components infinite should not be finite.",
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let transform = Transform3D::default();
+        let expected_json = "{\"basis\":{\"rows\":[{\"x\":1.0,\"y\":0.0,\"z\":0.0},{\"x\":0.0,\"y\":1.0,\"z\":0.0},{\"x\":0.0,\"y\":0.0,\"z\":1.0}]},\"origin\":{\"x\":0.0,\"y\":0.0,\"z\":0.0}}";
+
+        crate::builtin::test_utils::roundtrip(&transform, expected_json);
     }
 }

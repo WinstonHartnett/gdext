@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # Full CI workflow
-# Run before merging. Rebases on master to make sure CI passes for latest integration, not only for the PR at the time of creation.
+# Runs before merging. Rebases on master to make sure CI passes for latest integration, not only for the PR at the time of creation.
 
 name: Full CI
 
@@ -15,8 +15,6 @@ on:
 
 env:
   GDEXT_FEATURES: ''
-#  GDEXT_FEATURES: '--features crate/feature'
-#  GDEXT_CRATE_ARGS: '-p godot-codegen -p godot-ffi -p godot-core -p godot-macros -p godot'
 
   # LSan options: https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer
   # * report_objects: list individual leaked objects when running LeakSanitizer
@@ -42,7 +40,6 @@ jobs:
       - name: "Install Rust"
         uses: ./.github/composite/rust
         with:
-          rust: stable
           components: rustfmt
 
       - name: "Check rustfmt"
@@ -50,40 +47,20 @@ jobs:
 
 
   clippy:
-    name: clippy (${{ matrix.name }})
     runs-on: ubuntu-20.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include: 
-          - name: linux
-            rust-toolchain: stable
-            godot-binary: godot.linuxbsd.editor.dev.x86_64
-          
-          - name: linux-double
-            rust-toolchain: stable
-            godot-binary: godot.linuxbsd.editor.dev.double.x86_64
-            rust-extra-args: --features double-precision
     steps:
       - uses: actions/checkout@v3
 
       - name: "Install Rust"
         uses: ./.github/composite/rust
-
-      # TODO get rid of Godot binary, once the JSON is either versioned or fetched from somewhere
-      # Replaces also backspaces on Windows, since they cause problems in Bash
-      - name: "Install Godot"
-        uses: ./.github/composite/godot-install
         with:
-          artifact-name: godot-${{ matrix.name }}
-          godot-binary: ${{ matrix.godot-binary }}
+          components: clippy
 
       - name: "Check clippy"
         run: |
           cargo clippy --all-targets $GDEXT_FEATURES ${{ matrix.rust-extra-args }} -- \
           -D clippy::suspicious -D clippy::style -D clippy::complexity -D clippy::perf \
           -D clippy::dbg_macro -D clippy::todo -D clippy::unimplemented -D warnings 
-
 
   unit-test:
     name: unit-test (${{ matrix.name }}${{ matrix.rust-special }})
@@ -98,56 +75,38 @@ jobs:
         include:
           - name: macos
             os: macos-11
-            rust-toolchain: stable
-            godot-binary: godot.macos.editor.dev.x86_64
-            with-llvm: true
 
           - name: windows
             os: windows-latest
-            rust-toolchain: stable-x86_64-pc-windows-msvc
-            godot-binary: godot.windows.editor.dev.x86_64.exe
 
           # Don't use latest Ubuntu (22.04) as it breaks lots of ecosystem compatibility.
           # If ever moving to ubuntu-latest, need to manually install libtinfo5 for LLVM.
           - name: linux
             os: ubuntu-20.04
-            rust-toolchain: stable
-            godot-binary: godot.linuxbsd.editor.dev.x86_64
 
           - name: linux
             os: ubuntu-20.04
-            rust-toolchain: stable
+            rust-toolchain: nightly
             rust-special: -minimal-deps
-            godot-binary: godot.linuxbsd.editor.dev.x86_64
-          
+            rust-cache-key: minimal-deps
+
+          - name: linux
+            os: ubuntu-20.04
+            rust-toolchain: '1.66.0'
+            rust-special: -msrv
+
     steps:
       - uses: actions/checkout@v3
 
       - name: "Install Rust"
         uses: ./.github/composite/rust
         with:
-          rust: stable
-          cache-key: ${{ matrix.rust-special }} # '-minimal-deps' or empty/not defined
-          with-llvm: ${{ matrix.with-llvm }}
-
-      - name: "Install Rust nightly (minimal deps)"
-        uses: ./.github/composite/rust
-        with:
-          rust: nightly
-          cache-key: minimal-deps-nightly
-        if: ${{ matrix.rust-special == '-minimal-deps' }}
+          rust: ${{ matrix.rust-toolchain || 'stable' }}
+          cache-key: ${{ matrix.rust-cache-key }} # only needed when rustc version is possibly the same
 
       - name: "Install minimal dependency versions from Cargo"
+        if: matrix.rust-special == '-minimal-deps'
         run: cargo +nightly update -Z minimal-versions
-        if: ${{ matrix.rust-special == '-minimal-deps' }}
-
-      # TODO get rid of Godot binary, once the JSON is either versioned or fetched from somewhere
-      # Replaces also backspaces on Windows, since they cause problems in Bash
-      - name: "Install Godot"
-        uses: ./.github/composite/godot-install
-        with:
-          artifact-name: godot-${{ matrix.name }}
-          godot-binary: ${{ matrix.godot-binary }}
 
       - name: "Compile tests"
         run: cargo test $GDEXT_FEATURES --no-run ${{ matrix.rust-extra-args }}
@@ -164,46 +123,119 @@ jobs:
     strategy:
       fail-fast: false # cancel all jobs as soon as one fails?
       matrix:
+        # Naming: {os}[-{runtimeVersion}]-{apiVersion}
+        # runtimeVersion = version of Godot binary; apiVersion = version of GDExtension API against which gdext is compiled.
+
         # Order this way because macOS typically has the longest duration, followed by Windows, so it benefits total workflow execution time.
         # Additionally, the 'linux (msrv *)' special case will then be listed next to the other 'linux' jobs.
         # Note: Windows uses '--target x86_64-pc-windows-msvc' by default as Cargo argument.
         include:
-          - name: macos
+          # macOS
+
+          - name: macos-stableRt-4.0.3
             os: macos-12
-            rust-toolchain: stable
+            artifact-name: macos-stable
             godot-binary: godot.macos.editor.dev.x86_64
-            with-llvm: true
-          
+            godot-prebuilt-patch: '4.0.3'
+
+          - name: macos-4.0.3
+            os: macos-12
+            artifact-name: macos-nightly
+            godot-binary: godot.macos.editor.dev.x86_64
+            godot-prebuilt-patch: '4.0.3'
+
           - name: macos-double
             os: macos-12
-            rust-toolchain: stable
+            artifact-name: macos-double-nightly
             godot-binary: godot.macos.editor.dev.double.x86_64
-            rust-extra-args: --features double-precision
-            with-llvm: true
+            rust-extra-args: --features godot/double-precision
 
-          - name: windows
+          - name: macos-nightly
+            os: macos-12
+            artifact-name: macos-nightly
+            godot-binary: godot.macos.editor.dev.x86_64
+            rust-extra-args: --features godot/custom-godot
+            with-llvm: true
+            godot-prebuilt-patch: '4.1'
+
+          # Windows
+
+          - name: windows-stableRt-4.0.3
             os: windows-latest
-            rust-toolchain: stable-x86_64-pc-windows-msvc
+            artifact-name: windows-stable
             godot-binary: godot.windows.editor.dev.x86_64.exe
+            godot-prebuilt-patch: '4.0.3'
+
+          - name: windows-4.0.3
+            os: windows-latest
+            artifact-name: windows-nightly
+            godot-binary: godot.windows.editor.dev.x86_64.exe
+            godot-prebuilt-patch: '4.0.3'
 
           - name: windows-double
             os: windows-latest
-            rust-toolchain: stable-x86_64-pc-windows-msvc
+            artifact-name: windows-double-nightly
             godot-binary: godot.windows.editor.dev.double.x86_64.exe
-            rust-extra-args: --features double-precision
+            rust-extra-args: --features godot/double-precision
+
+          - name: windows-nightly
+            os: windows-latest
+            artifact-name: windows-nightly
+            godot-binary: godot.windows.editor.dev.x86_64.exe
+            rust-extra-args: --features godot/custom-godot
+            godot-prebuilt-patch: '4.1'
+
+          # Linux
 
           # Don't use latest Ubuntu (22.04) as it breaks lots of ecosystem compatibility.
           # If ever moving to ubuntu-latest, need to manually install libtinfo5 for LLVM.
-          - name: linux
+          - name: linux-stableRt-4.0.3
             os: ubuntu-20.04
-            rust-toolchain: stable
+            artifact-name: linux-stable
             godot-binary: godot.linuxbsd.editor.dev.x86_64
+
+          - name: linux-4.0.3
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            godot-check-header: false # disabled for now
+
+          - name: linux-4.0.2
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            godot-prebuilt-patch: '4.0.2'
+
+          - name: linux-4.0.1
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            godot-prebuilt-patch: '4.0.1'
+
+          - name: linux-4.0
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            godot-prebuilt-patch: '4.0'
 
           - name: linux-double
             os: ubuntu-20.04
-            rust-toolchain: stable
+            artifact-name: linux-double-nightly
             godot-binary: godot.linuxbsd.editor.dev.double.x86_64
-            rust-extra-args: --features double-precision
+            rust-extra-args: --features godot/double-precision
+
+          - name: linux-features
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            rust-extra-args: --features godot/threads,godot/serde
+
+          - name: linux-nightly
+            os: ubuntu-20.04
+            artifact-name: linux-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64
+            rust-extra-args: --features godot/custom-godot
+            godot-prebuilt-patch: '4.1'
 
           # Special Godot binaries compiled with AddressSanitizer/LeakSanitizer to detect UB/leaks.
           # Additionally, the Godot source is patched to make dlclose() a no-op, as unloading dynamic libraries loses stacktrace and
@@ -211,19 +243,34 @@ jobs:
           # The gcc version can possibly be removed later, as it is slower and needs a larger artifact than the clang one.
 
           # --disallow-focus: fail if #[itest(focus)] is encountered, to prevent running only a few tests for full CI
-          - name: linux-memcheck-gcc
-            os: ubuntu-20.04
-            godot-binary: godot.linuxbsd.editor.dev.x86_64.san
-            godot-args: -- --disallow-focus
-            rust-toolchain: nightly
-            rust-env-rustflags: -Zrandomize-layout
 
-          - name: linux-memcheck-clang
+          - name: linux-memcheck-stableRt-4.0.3
             os: ubuntu-20.04
+            artifact-name: linux-memcheck-clang-stable
             godot-binary: godot.linuxbsd.editor.dev.x86_64.llvm.san
             godot-args: -- --disallow-focus
             rust-toolchain: nightly
             rust-env-rustflags: -Zrandomize-layout
+
+          # FIXME(#298): memory leaks detected when running 4.0.3 API with 4.1+ binary
+#          - name: linux-memcheck-4.0.3
+#            os: ubuntu-20.04
+#            artifact-name: linux-memcheck-clang-nightly
+#            godot-binary: godot.linuxbsd.editor.dev.x86_64.llvm.san
+#            godot-args: -- --disallow-focus
+#            rust-toolchain: nightly
+#            rust-env-rustflags: -Zrandomize-layout
+
+          - name: linux-memcheck-nightly
+            os: ubuntu-20.04
+            artifact-name: linux-memcheck-clang-nightly
+            godot-binary: godot.linuxbsd.editor.dev.x86_64.llvm.san
+            godot-args: -- --disallow-focus
+            rust-toolchain: nightly
+            rust-env-rustflags: -Zrandomize-layout
+            rust-extra-args: --features godot/custom-godot
+            godot-prebuilt-patch: '4.1'
+
 
     steps:
       - uses: actions/checkout@v3
@@ -231,13 +278,15 @@ jobs:
       - name: "Run Godot integration test"
         uses: ./.github/composite/godot-itest
         with:
-          artifact-name: godot-${{ matrix.name }}
+          artifact-name: godot-${{ matrix.artifact-name }}
           godot-binary: ${{ matrix.godot-binary }}
           godot-args: ${{ matrix.godot-args }}
+          godot-prebuilt-patch: ${{ matrix.godot-prebuilt-patch }}
           rust-extra-args: ${{ matrix.rust-extra-args }}
-          rust-toolchain: ${{ matrix.rust-toolchain }}
+          rust-toolchain: ${{ matrix.rust-toolchain || 'stable' }}
           rust-env-rustflags: ${{ matrix.rust-env-rustflags }}
           with-llvm: ${{ matrix.with-llvm }}
+          godot-check-header: ${{ matrix.godot-check-header }}
 
 
   license-guard:

@@ -9,7 +9,10 @@ use godot_ffi as sys;
 use crate::builtin::*;
 use std::fmt;
 use sys::types::*;
-use sys::{ffi_methods, interface_fn, GodotFfi, TagString, TagType};
+use sys::{ffi_methods, interface_fn, GodotFfi};
+
+// FIXME remove dependency on these types
+use sys::{__GdextString, __GdextType};
 
 /// Defines and implements a single packed array type. This macro is not hygienic and is meant to
 /// be used only in the current module.
@@ -85,15 +88,17 @@ macro_rules! impl_packed_array {
             pub fn to_vec(&self) -> Vec<$Element> {
                 let len = self.len();
                 let mut vec = Vec::with_capacity(len);
-                let ptr = self.ptr(0);
-                for offset in 0..to_isize(len) {
-                    // SAFETY: Packed arrays are stored contiguously in memory, so we can use
-                    // pointer arithmetic instead of going through `$operator_index_const` for
-                    // every index.
-                    // Note that we do need to use `.clone()` because `GodotString` is refcounted;
-                    // we can't just do a memcpy.
-                    let element = unsafe { (*ptr.offset(offset)).clone() };
-                    vec.push(element);
+                if len > 0 {
+                    let ptr = self.ptr(0);
+                    for offset in 0..to_isize(len) {
+                        // SAFETY: Packed arrays are stored contiguously in memory, so we can use
+                        // pointer arithmetic instead of going through `$operator_index_const` for
+                        // every index.
+                        // Note that we do need to use `.clone()` because `GodotString` is refcounted;
+                        // we can't just do a memcpy.
+                        let element = unsafe { (*ptr.offset(offset)).clone() };
+                        vec.push(element);
+                    }
                 }
                 vec
             }
@@ -385,8 +390,26 @@ macro_rules! impl_packed_array {
             }
         }
 
-        impl GodotFfi for $PackedArray {
-            ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
+        unsafe impl GodotFfi for $PackedArray {
+            ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque;
+                fn from_sys;
+                fn sys;
+                fn from_sys_init;
+                // SAFETY:
+                // Nothing special needs to be done beyond a `std::mem::swap` when returning a packed array.
+                fn move_return_ptr;
+            }
+
+            // SAFETY:
+            // Packed arrays are properly initialized through a `from_sys` call, but the ref-count should be
+            // incremented as that is the callee's responsibility.
+            //
+            // Using `std::mem::forget(array.clone())` increments the ref count.
+            unsafe fn from_arg_ptr(ptr: sys::GDExtensionTypePtr, _call_type: sys::PtrcallType) -> Self {
+                let array = Self::from_sys(ptr);
+                std::mem::forget(array.clone());
+                array
+            }
 
             unsafe fn from_sys_init_default(init_fn: impl FnOnce(sys::GDExtensionTypePtr)) -> Self {
                 let mut result = Self::default();
@@ -494,7 +517,7 @@ impl_packed_array!(
     opaque_type: OpaquePackedStringArray,
     inner_type: InnerPackedStringArray,
     argument_type: GodotString,
-    return_type: TagString,
+    return_type: __GdextString,
     from_array: packed_string_array_from_array,
     operator_index: packed_string_array_operator_index,
     operator_index_const: packed_string_array_operator_index_const,
@@ -512,7 +535,7 @@ impl_packed_array!(
     opaque_type: OpaquePackedVector2Array,
     inner_type: InnerPackedVector2Array,
     argument_type: Vector2,
-    return_type: TagType,
+    return_type: __GdextType,
     from_array: packed_vector2_array_from_array,
     operator_index: packed_vector2_array_operator_index,
     operator_index_const: packed_vector2_array_operator_index_const,
@@ -530,7 +553,7 @@ impl_packed_array!(
     opaque_type: OpaquePackedVector3Array,
     inner_type: InnerPackedVector3Array,
     argument_type: Vector3,
-    return_type: TagType,
+    return_type: __GdextType,
     from_array: packed_vector3_array_from_array,
     operator_index: packed_vector3_array_operator_index,
     operator_index_const: packed_vector3_array_operator_index_const,
@@ -548,7 +571,7 @@ impl_packed_array!(
     opaque_type: OpaquePackedColorArray,
     inner_type: InnerPackedColorArray,
     argument_type: Color,
-    return_type: TagType,
+    return_type: __GdextType,
     from_array: packed_color_array_from_array,
     operator_index: packed_color_array_operator_index,
     operator_index_const: packed_color_array_operator_index_const,

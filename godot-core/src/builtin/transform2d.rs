@@ -9,7 +9,7 @@ use godot_ffi as sys;
 use sys::{ffi_methods, GodotFfi};
 
 use super::glam_helpers::{GlamConv, GlamType};
-use super::{math::*, Vector2};
+use super::{math::*, Rect2, Vector2};
 
 use super::real_consts::PI;
 use super::{real, RAffine2, RMat2};
@@ -27,6 +27,7 @@ use super::{real, RAffine2, RMat2};
 ///
 /// For methods that don't take translation into account, see [`Basis2D`].
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Transform2D {
     /// The first basis vector.
@@ -320,6 +321,25 @@ impl Mul<real> for Transform2D {
     }
 }
 
+impl Mul<Rect2> for Transform2D {
+    type Output = Rect2;
+
+    /// Transforms each coordinate in `rhs.position` and `rhs.end()` individually by this transform, then
+    /// creates a `Rect2` containing all of them.
+    fn mul(self, rhs: Rect2) -> Self::Output {
+        // https://web.archive.org/web/20220317024830/https://dev.theomader.com/transform-bounding-boxes/
+        let xa = self.a * rhs.position.x;
+        let xb = self.a * rhs.end().x;
+
+        let ya = self.b * rhs.position.y;
+        let yb = self.b * rhs.end().y;
+
+        let position = Vector2::coord_min(xa, xb) + Vector2::coord_min(ya, yb) + self.origin;
+        let end = Vector2::coord_max(xa, xb) + Vector2::coord_max(ya, yb) + self.origin;
+        Rect2::new(position, end - position)
+    }
+}
+
 impl GlamType for RAffine2 {
     type Mapped = Transform2D;
 
@@ -339,7 +359,9 @@ impl GlamConv for Transform2D {
     type Glam = RAffine2;
 }
 
-impl GodotFfi for Transform2D {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Transform2D {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -475,7 +497,6 @@ impl Default for Basis2D {
 impl Display for Basis2D {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let [a, b] = self.cols;
-
         write!(f, "[a: {a}, b: {b})]")
     }
 }
@@ -718,5 +739,14 @@ mod test {
                 .is_finite(),
             "let with: Transform2D three components infinite should not be finite.",
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let transform = Transform2D::default();
+        let expected_json = "{\"a\":{\"x\":0.0,\"y\":0.0},\"b\":{\"x\":0.0,\"y\":0.0},\"origin\":{\"x\":0.0,\"y\":0.0}}";
+
+        crate::builtin::test_utils::roundtrip(&transform, expected_json);
     }
 }

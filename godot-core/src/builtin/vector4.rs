@@ -9,6 +9,7 @@ use std::fmt;
 use godot_ffi as sys;
 use sys::{ffi_methods, GodotFfi};
 
+use crate::builtin::math::*;
 use crate::builtin::Vector4i;
 
 use super::glam_helpers::{GlamConv, GlamType};
@@ -23,15 +24,19 @@ use super::{real, RVec4};
 /// vectors; use the gdext library with the `double-precision` feature in that case.
 ///
 /// See [`Vector4i`] for its integer counterpart.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vector4 {
     /// The vector's X component.
     pub x: real,
+
     /// The vector's Y component.
     pub y: real,
+
     /// The vector's Z component.
     pub z: real,
+
     /// The vector's W component.
     pub w: real,
 }
@@ -80,6 +85,13 @@ impl Vector4 {
     fn to_glam(self) -> RVec4 {
         RVec4::new(self.x, self.y, self.z, self.w)
     }
+
+    pub fn is_equal_approx(self, to: Self) -> bool {
+        is_equal_approx(self.x, to.x)
+            && is_equal_approx(self.y, to.y)
+            && is_equal_approx(self.z, to.z)
+            && is_equal_approx(self.w, to.w)
+    }
 }
 
 /// Formats the vector like Godot: `(x, y, z, w)`.
@@ -89,25 +101,32 @@ impl fmt::Display for Vector4 {
     }
 }
 
-impl GodotFfi for Vector4 {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector4 {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 /// Enumerates the axes in a [`Vector4`].
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 #[repr(i32)]
 pub enum Vector4Axis {
     /// The X axis.
     X,
+
     /// The Y axis.
     Y,
+
     /// The Z axis.
     Z,
+
     /// The W axis.
     W,
 }
 
-impl GodotFfi for Vector4Axis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector4Axis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -125,4 +144,36 @@ impl GlamType for RVec4 {
 
 impl GlamConv for Vector4 {
     type Glam = RVec4;
+}
+
+#[cfg(test)]
+mod test {
+    use crate::assert_eq_approx;
+
+    use super::*;
+
+    #[test]
+    fn coord_min_max() {
+        let a = Vector4::new(1.2, 3.4, 5.6, 0.1);
+        let b = Vector4::new(0.1, 5.6, 2.3, 1.2);
+        assert_eq_approx!(
+            a.coord_min(b),
+            Vector4::new(0.1, 3.4, 2.3, 0.1),
+            Vector4::is_equal_approx
+        );
+        assert_eq_approx!(
+            a.coord_max(b),
+            Vector4::new(1.2, 5.6, 5.6, 1.2),
+            Vector4::is_equal_approx
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let vector = Vector4::default();
+        let expected_json = "{\"x\":0.0,\"y\":0.0,\"z\":0.0,\"w\":0.0}";
+
+        crate::builtin::test_utils::roundtrip(&vector, expected_json);
+    }
 }

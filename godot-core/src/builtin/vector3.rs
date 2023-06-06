@@ -15,7 +15,7 @@ use crate::builtin::Vector3i;
 
 use super::glam_helpers::GlamConv;
 use super::glam_helpers::GlamType;
-use super::{real, RVec3};
+use super::{real, Basis, RVec3};
 
 /// Vector used for 3D math using floating point coordinates.
 ///
@@ -27,13 +27,16 @@ use super::{real, RVec3};
 /// vectors; use the gdext library with the `double-precision` feature in that case.
 ///
 /// See [`Vector3i`] for its integer counterpart.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Vector3 {
     /// The vector's X component.
     pub x: real,
+
     /// The vector's Y component.
     pub y: real,
+
     /// The vector's Z component.
     pub z: real,
 }
@@ -306,6 +309,15 @@ impl Vector3 {
             snapped(self.z, step.z),
         )
     }
+
+    /// Returns this vector rotated around `axis` by `angle` radians. `axis` must be normalized.
+    ///
+    /// # Panics
+    /// If `axis` is not normalized.
+    pub fn rotated(self, axis: Self, angle: real) -> Self {
+        assert!(axis.is_normalized());
+        Basis::from_axis_angle(axis, angle) * self
+    }
 }
 
 /// Formats the vector like Godot: `(x, y, z)`.
@@ -320,24 +332,30 @@ impl_float_vector_fns!(Vector3, real);
 impl_vector_operators!(Vector3, real, (x, y, z));
 impl_vector_index!(Vector3, real, (x, y, z), Vector3Axis, (X, Y, Z));
 
-impl GodotFfi for Vector3 {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector3 {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 /// Enumerates the axes in a [`Vector3`].
 // TODO auto-generate this, alongside all the other builtin type's enums
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 #[repr(i32)]
 pub enum Vector3Axis {
     /// The X axis.
     X,
+
     /// The Y axis.
     Y,
+
     /// The Z axis.
     Z,
 }
 
-impl GodotFfi for Vector3Axis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Vector3Axis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
@@ -368,4 +386,64 @@ impl GlamType for glam::Vec3A {
 
 impl GlamConv for Vector3 {
     type Glam = RVec3;
+}
+
+#[cfg(test)]
+mod test {
+    use crate::assert_eq_approx;
+
+    use super::*;
+    use godot::builtin::real_consts::TAU;
+
+    // Translated from Godot
+    #[test]
+    #[allow(clippy::excessive_precision)]
+    fn rotation() {
+        let vector = Vector3::new(1.2, 3.4, 5.6);
+        assert_eq_approx!(
+            vector.rotated(Vector3::new(0.0, 1.0, 0.0), TAU),
+            vector,
+            Vector3::is_equal_approx
+        );
+        assert_eq_approx!(
+            vector.rotated(Vector3::new(0.0, 1.0, 0.0), TAU / 4.0),
+            Vector3::new(5.6, 3.4, -1.2),
+            Vector3::is_equal_approx
+        );
+        assert_eq_approx!(
+            vector.rotated(Vector3::new(1.0, 0.0, 0.0), TAU / 3.0),
+            Vector3::new(1.2, -6.54974226119285642, 0.1444863728670914),
+            Vector3::is_equal_approx
+        );
+        assert_eq_approx!(
+            vector.rotated(Vector3::new(0.0, 0.0, 1.0), TAU / 2.0),
+            vector.rotated(Vector3::new(0.0, 0.0, 1.0), TAU / -2.0),
+            Vector3::is_equal_approx
+        );
+    }
+
+    #[test]
+    fn coord_min_max() {
+        let a = Vector3::new(1.2, 3.4, 5.6);
+        let b = Vector3::new(0.1, 5.6, 2.3);
+        assert_eq_approx!(
+            a.coord_min(b),
+            Vector3::new(0.1, 3.4, 2.3),
+            Vector3::is_equal_approx
+        );
+        assert_eq_approx!(
+            a.coord_max(b),
+            Vector3::new(1.2, 5.6, 5.6),
+            Vector3::is_equal_approx
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let vector = Vector3::default();
+        let expected_json = "{\"x\":0.0,\"y\":0.0,\"z\":0.0}";
+
+        crate::builtin::test_utils::roundtrip(&vector, expected_json);
+    }
 }

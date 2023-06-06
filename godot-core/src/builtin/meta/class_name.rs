@@ -13,12 +13,19 @@ use crate::obj::GodotClass;
 
 /// Utility to construct class names known at compile time.
 /// Cannot be a function since the backing string must be retained.
-#[derive(Eq, PartialEq, Hash, Clone, Debug)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ClassName {
     backing: StringName,
 }
 
 impl ClassName {
+    /// In Godot, an empty `StringName` in a place that expects a class name, means that there is no class.
+    pub fn none() -> Self {
+        Self {
+            backing: StringName::default(),
+        }
+    }
+
     pub fn of<T: GodotClass>() -> Self {
         Self {
             backing: StringName::from(T::CLASS_NAME),

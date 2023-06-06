@@ -1,4 +1,6 @@
-use godot::engine::{AnimatedSprite2D, Area2D, CollisionShape2D, PhysicsBody2D};
+use godot::engine::{
+    AnimatedSprite2D, Area2D, Area2DVirtual, CollisionShape2D, Engine, PhysicsBody2D,
+};
 use godot::prelude::*;
 
 #[derive(GodotClass)]
@@ -42,7 +44,7 @@ impl Player {
 }
 
 #[godot_api]
-impl GodotExt for Player {
+impl Area2DVirtual for Player {
     fn init(base: Base<Area2D>) -> Self {
         Player {
             speed: 400.0,
@@ -53,11 +55,17 @@ impl GodotExt for Player {
 
     fn ready(&mut self) {
         let viewport = self.base.get_viewport_rect();
-        self.screen_size = viewport.size();
+        self.screen_size = viewport.size;
         self.base.hide();
     }
 
     fn process(&mut self, delta: f64) {
+        // Don't process if running in editor. This part should be removed when
+        // issue is resolved: https://github.com/godot-rust/gdext/issues/70
+        if Engine::singleton().is_editor_hint() {
+            return;
+        }
+
         let mut animated_sprite = self
             .base
             .get_node_as::<AnimatedSprite2D>("AnimatedSprite2D");
@@ -66,16 +74,16 @@ impl GodotExt for Player {
 
         // Note: exact=false by default, in Rust we have to provide it explicitly
         let input = Input::singleton();
-        if input.is_action_pressed("ui_right".into(), false) {
+        if input.is_action_pressed("move_right".into(), false) {
             velocity += Vector2::RIGHT;
         }
-        if input.is_action_pressed("ui_left".into(), false) {
+        if input.is_action_pressed("move_left".into(), false) {
             velocity += Vector2::LEFT;
         }
-        if input.is_action_pressed("ui_down".into(), false) {
+        if input.is_action_pressed("move_down".into(), false) {
             velocity += Vector2::DOWN;
         }
-        if input.is_action_pressed("ui_up".into(), false) {
+        if input.is_action_pressed("move_up".into(), false) {
             velocity += Vector2::UP;
         }
 

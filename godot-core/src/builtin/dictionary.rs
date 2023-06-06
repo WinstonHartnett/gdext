@@ -6,13 +6,15 @@
 
 use godot_ffi as sys;
 
+use crate::builtin::meta::VariantMetadata;
 use crate::builtin::{inner, FromVariant, ToVariant, Variant};
+use crate::export::{Export, ExportInfo};
 use crate::obj::Share;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::addr_of_mut;
 use sys::types::OpaqueDictionary;
-use sys::{ffi_methods, interface_fn, GodotFfi};
+use sys::{ffi_methods, interface_fn, AsUninit, GodotFfi};
 
 use super::VariantArray;
 
@@ -192,6 +194,8 @@ impl Dictionary {
     /// _Godot equivalent: `dict[key] = value`_
     pub fn set<K: ToVariant, V: ToVariant>(&mut self, key: K, value: V) {
         let key = key.to_variant();
+
+        // SAFETY: always returns a valid pointer to a value in the dictionary; either pre-existing or newly inserted.
         unsafe {
             *self.get_ptr_mut(key) = value.to_variant();
         }
@@ -226,12 +230,16 @@ impl Dictionary {
 
     /// Get the pointer corresponding to the given key in the dictionary.
     ///
-    /// If there exists no value at the given key, a `NIL` variant will be created.
+    /// If there exists no value at the given key, a `NIL` variant will be inserted for that key.
     fn get_ptr_mut<K: ToVariant>(&mut self, key: K) -> *mut Variant {
         let key = key.to_variant();
+
+        // SAFETY: accessing an unknown key _mutably_ creates that entry in the dictionary, with value `NIL`.
         let ptr = unsafe {
             interface_fn!(dictionary_operator_index)(self.sys_mut(), key.var_sys_const())
         };
+
+        // Never a null pointer, since entry either existed already or was inserted above.
         Variant::ptr_from_sys_mut(ptr)
     }
 }
@@ -239,13 +247,33 @@ impl Dictionary {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Traits
 
-impl GodotFfi for Dictionary {
-    ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
+// SAFETY:
+// - `move_return_ptr`
+//   Nothing special needs to be done beyond a `std::mem::swap` when returning an Dictionary.
+//   So we can just use `ffi_methods`.
+//
+// - `from_arg_ptr`
+//   Dictionaries are properly initialized through a `from_sys` call, but the ref-count should be
+//   incremented as that is the callee's responsibility. Which we do by calling
+//   `std::mem::forget(dictionary.share())`.
+unsafe impl GodotFfi for Dictionary {
+    ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque;
+        fn from_sys;
+        fn from_sys_init;
+        fn sys;
+        fn move_return_ptr;
+    }
 
     unsafe fn from_sys_init_default(init_fn: impl FnOnce(sys::GDExtensionTypePtr)) -> Self {
         let mut result = Self::default();
         init_fn(result.sys_mut());
         result
+    }
+
+    unsafe fn from_arg_ptr(ptr: sys::GDExtensionTypePtr, _call_type: sys::PtrcallType) -> Self {
+        let dictionary = Self::from_sys(ptr);
+        std::mem::forget(dictionary.share());
+        dictionary
     }
 }
 
@@ -277,6 +305,16 @@ impl Share for Dictionary {
                 ctor(self_ptr, args.as_ptr());
             })
         }
+    }
+}
+
+impl Export for Dictionary {
+    fn export(&self) -> Self {
+        self.share()
+    }
+
+    fn default_export_info() -> ExportInfo {
+        ExportInfo::with_hint_none(Self::variant_type())
     }
 }
 
@@ -361,28 +399,28 @@ impl<'a> DictionaryIter<'a> {
     }
 
     fn call_init(dictionary: &Dictionary) -> Option<Variant> {
-        // SAFETY:
-        // `dictionary` is a valid `Dictionary` since we have a reference to it,
-        //    so this will call the implementation for dictionaries.
-        // `variant` is an initialized and valid `Variant`.
         let variant: Variant = Variant::nil();
-        unsafe { Self::ffi_iterate(interface_fn!(variant_iter_init), dictionary, variant) }
+        let iter_fn = |dictionary, next_value: sys::GDExtensionVariantPtr, valid| unsafe {
+            interface_fn!(variant_iter_init)(dictionary, next_value.as_uninit(), valid)
+        };
+
+        Self::ffi_iterate(iter_fn, dictionary, variant)
     }
 
     fn call_next(dictionary: &Dictionary, last_key: Variant) -> Option<Variant> {
-        // SAFETY:
-        // `dictionary` is a valid `Dictionary` since we have a reference to it,
-        //    so this will call the implementation for dictionaries.
-        // `last_key` is an initialized and valid `Variant`, since we own a copy of it.
-        unsafe { Self::ffi_iterate(interface_fn!(variant_iter_next), dictionary, last_key) }
+        let iter_fn = |dictionary, next_value, valid| unsafe {
+            interface_fn!(variant_iter_next)(dictionary, next_value, valid)
+        };
+
+        Self::ffi_iterate(iter_fn, dictionary, last_key)
     }
 
     /// Calls the provided Godot FFI function, in order to iterate the current state.
     ///
     /// # Safety:
     /// `iter_fn` must point to a valid function that interprets the parameters according to their type specification.
-    unsafe fn ffi_iterate(
-        iter_fn: unsafe extern "C" fn(
+    fn ffi_iterate(
+        iter_fn: unsafe fn(
             sys::GDExtensionConstVariantPtr,
             sys::GDExtensionVariantPtr,
             *mut sys::GDExtensionBool,
@@ -391,14 +429,20 @@ impl<'a> DictionaryIter<'a> {
         next_value: Variant,
     ) -> Option<Variant> {
         let dictionary = dictionary.to_variant();
-        let mut valid: u8 = 0;
+        let mut valid_u8: u8 = 0;
 
-        let has_next = iter_fn(
-            dictionary.var_sys(),
-            next_value.var_sys(),
-            addr_of_mut!(valid),
-        );
-        let valid = super::u8_to_bool(valid);
+        // SAFETY:
+        // `dictionary` is a valid `Dictionary` since we have a reference to it,
+        //    so this will call the implementation for dictionaries.
+        // `last_key` is an initialized and valid `Variant`, since we own a copy of it.
+        let has_next = unsafe {
+            iter_fn(
+                dictionary.var_sys(),
+                next_value.var_sys(),
+                addr_of_mut!(valid_u8),
+            )
+        };
+        let valid = super::u8_to_bool(valid_u8);
         let has_next = super::u8_to_bool(has_next);
 
         if has_next {

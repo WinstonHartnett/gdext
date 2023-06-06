@@ -15,7 +15,7 @@ use std::num::NonZeroU64;
 ///
 /// This is its own type for type safety and to deal with the inconsistent representation in Godot as both `u64` (C++) and `i64` (GDScript).
 /// You can usually treat this as an opaque value and pass it to and from GDScript; there are conversion methods however.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct InstanceId {
     // Note: in the public API, signed i64 is the canonical representation.
@@ -77,14 +77,16 @@ impl Debug for InstanceId {
     }
 }
 
-impl GodotFfi for InstanceId {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for InstanceId {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 impl FromVariant for InstanceId {
     fn try_from_variant(variant: &Variant) -> Result<Self, VariantConversionError> {
         i64::try_from_variant(variant)
-            .and_then(|i| InstanceId::try_from_i64(i).ok_or(VariantConversionError))
+            .and_then(|i| InstanceId::try_from_i64(i).ok_or(VariantConversionError::BadValue))
     }
 }
 

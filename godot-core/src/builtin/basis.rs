@@ -23,6 +23,7 @@ use super::{real, RMat3, RQuat, RVec2, RVec3};
 /// The basis vectors are the columns of the matrix, whereas the [`rows`](Self::rows) field represents
 /// the row vectors.
 #[derive(Copy, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Basis {
     /// The rows of the matrix. These are *not* the basis vectors.  
@@ -142,9 +143,19 @@ impl Basis {
     /// orthonormalized. The `target` and `up` vectors cannot be zero, and
     /// cannot be parallel to each other.
     ///
+    #[cfg(gdextension_api = "4.0")]
     /// _Godot equivalent: `Basis.looking_at()`_
     pub fn new_looking_at(target: Vector3, up: Vector3) -> Self {
         super::inner::InnerBasis::looking_at(target, up)
+    }
+    #[cfg(not(gdextension_api = "4.0"))]
+    /// If `use_model_front` is true, the +Z axis (asset front) is treated as forward (implies +X is left)
+    /// and points toward the target position. By default, the -Z axis (camera forward) is treated as forward
+    /// (implies +X is right).
+    ///
+    /// _Godot equivalent: `Basis.looking_at()`_
+    pub fn new_looking_at(target: Vector3, up: Vector3, use_model_front: bool) -> Self {
+        super::inner::InnerBasis::looking_at(target, up, use_model_front)
     }
 
     /// Creates a `[Vector3; 3]` with the columns of the `Basis`.
@@ -570,13 +581,15 @@ impl Mul<Vector3> for Basis {
     }
 }
 
-impl GodotFfi for Basis {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Basis {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
 /// The ordering used to interpret a set of euler angles as extrinsic
 /// rotations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(C)]
 pub enum EulerOrder {
     XYZ = 0,
@@ -832,5 +845,14 @@ mod test {
             !Basis::from_cols(infinite, infinite, infinite).is_finite(),
             "Basis with three components infinite should not be finite."
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let basis = Basis::IDENTITY;
+        let expected_json = "{\"rows\":[{\"x\":1.0,\"y\":0.0,\"z\":0.0},{\"x\":0.0,\"y\":1.0,\"z\":0.0},{\"x\":0.0,\"y\":0.0,\"z\":1.0}]}";
+
+        crate::builtin::test_utils::roundtrip(&basis, expected_json);
     }
 }

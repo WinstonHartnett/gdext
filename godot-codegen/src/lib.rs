@@ -8,12 +8,10 @@ mod api_parser;
 mod central_generator;
 mod class_generator;
 mod context;
-mod godot_exe;
-mod godot_version;
+mod interface_generator;
 mod special_cases;
 mod util;
 mod utilities_generator;
-mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -23,38 +21,45 @@ use central_generator::{
     generate_core_central_file, generate_core_mod_file, generate_sys_central_file,
     generate_sys_mod_file,
 };
-use class_generator::{generate_builtin_class_files, generate_class_files};
+use class_generator::{
+    generate_builtin_class_files, generate_class_files, generate_native_structures_files,
+};
 use context::Context;
-use util::ident;
+use interface_generator::generate_sys_interface_file;
+use util::{ident, to_pascal_case, to_snake_case};
 use utilities_generator::generate_utilities_file;
-use watch::StopWatch;
 
-use crate::util::{to_pascal_case, to_snake_case};
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, ToTokens};
 use std::path::{Path, PathBuf};
 
-pub fn generate_sys_files(sys_gen_path: &Path) {
+pub fn generate_sys_files(
+    sys_gen_path: &Path,
+    h_path: &Path,
+    watch: &mut godot_bindings::StopWatch,
+) {
     let mut out_files = vec![];
-    let mut watch = StopWatch::start();
 
     generate_sys_mod_file(sys_gen_path, &mut out_files);
 
-    let (api, build_config) = load_extension_api(&mut watch);
+    let (api, build_config) = load_extension_api(watch);
     let mut ctx = Context::build_from_api(&api);
     watch.record("build_context");
 
     generate_sys_central_file(&api, &mut ctx, build_config, sys_gen_path, &mut out_files);
     watch.record("generate_central_file");
 
+    let is_godot_4_0 = api.header.version_major == 4 && api.header.version_minor == 0;
+    generate_sys_interface_file(h_path, sys_gen_path, is_godot_4_0, &mut out_files);
+    watch.record("generate_interface_file");
+
     rustfmt_if_needed(out_files);
     watch.record("rustfmt");
-    watch.write_stats_to(&sys_gen_path.join("codegen-stats.txt"));
 }
 
 pub fn generate_core_files(core_gen_path: &Path) {
     let mut out_files = vec![];
-    let mut watch = StopWatch::start();
+    let mut watch = godot_bindings::StopWatch::start();
 
     generate_core_mod_file(core_gen_path, &mut out_files);
 
@@ -88,12 +93,21 @@ pub fn generate_core_files(core_gen_path: &Path) {
     );
     watch.record("generate_builtin_class_files");
 
+    generate_native_structures_files(
+        &api,
+        &mut ctx,
+        build_config,
+        &core_gen_path.join("native"),
+        &mut out_files,
+    );
+    watch.record("generate_native_structures_files");
+
     rustfmt_if_needed(out_files);
     watch.record("rustfmt");
     watch.write_stats_to(&core_gen_path.join("codegen-stats.txt"));
 }
 
-// #[cfg(feature = "codegen-fmt")]
+#[cfg(feature = "codegen-fmt")]
 fn rustfmt_if_needed(out_files: Vec<PathBuf>) {
     println!("Format {} generated files...", out_files.len());
 
@@ -113,9 +127,9 @@ fn rustfmt_if_needed(out_files: Vec<PathBuf>) {
 
     println!("Rustfmt completed.");
 }
-//
-// #[cfg(not(feature = "codegen-fmt"))]
-// fn rustfmt_if_needed(_out_files: Vec<PathBuf>) {}
+
+#[cfg(not(feature = "codegen-fmt"))]
+fn rustfmt_if_needed(_out_files: Vec<PathBuf>) {}
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Shared utility types
@@ -127,6 +141,9 @@ enum RustTy {
 
     /// `TypedArray<i32>`
     BuiltinArray(TokenStream),
+
+    /// C-style raw pointer to a `RustTy`.
+    RawPointer { inner: Box<RustTy>, is_const: bool },
 
     /// `TypedArray<Gd<PhysicsBody3D>>`
     EngineArray {
@@ -165,6 +182,14 @@ impl ToTokens for RustTy {
         match self {
             RustTy::BuiltinIdent(ident) => ident.to_tokens(tokens),
             RustTy::BuiltinArray(path) => path.to_tokens(tokens),
+            RustTy::RawPointer {
+                inner,
+                is_const: true,
+            } => quote! { *const #inner }.to_tokens(tokens),
+            RustTy::RawPointer {
+                inner,
+                is_const: false,
+            } => quote! { *mut #inner }.to_tokens(tokens),
             RustTy::EngineArray { tokens: path, .. } => path.to_tokens(tokens),
             RustTy::EngineEnum { tokens: path, .. } => path.to_tokens(tokens),
             RustTy::EngineClass { tokens: path, .. } => path.to_tokens(tokens),
@@ -196,6 +221,10 @@ impl TyName {
         } else {
             format!("{}  [renamed {}]", self.godot_ty, self.rust_ty)
         }
+    }
+
+    fn virtual_trait_name(&self) -> String {
+        format!("{}Virtual", self.rust_ty)
     }
 }
 
@@ -229,20 +258,24 @@ impl ToTokens for ModName {
 }
 
 struct GeneratedClass {
-    tokens: TokenStream,
+    code: TokenStream,
+    notification_enum_name: Ident,
+    has_own_notification_enum: bool,
     inherits_macro_ident: Ident,
-    has_pub_module: bool,
+    /// Sidecars are the associated modules with related enum/flag types, such as `node_3d` for `Node3D` class.
+    has_sidecar_module: bool,
 }
 
 struct GeneratedBuiltin {
-    tokens: TokenStream,
+    code: TokenStream,
 }
 
 struct GeneratedClassModule {
     class_name: TyName,
     module_name: ModName,
+    own_notification_enum_name: Option<Ident>,
     inherits_macro_ident: Ident,
-    is_pub: bool,
+    is_pub_sidecar: bool,
 }
 
 struct GeneratedBuiltinModule {
@@ -261,6 +294,7 @@ const SELECTED_CLASSES: &[&str] = &[
     "AudioStreamPlayer",
     "BaseButton",
     "Button",
+    "BoxMesh",
     "Camera2D",
     "Camera3D",
     "CanvasItem",
@@ -268,14 +302,18 @@ const SELECTED_CLASSES: &[&str] = &[
     "CollisionObject2D",
     "CollisionShape2D",
     "Control",
+    "Engine",
     "FileAccess",
     "HTTPRequest",
     "Image",
     "ImageTextureLayered",
     "Input",
+    "InputEvent",
+    "InputEventAction",
     "Label",
     "MainLoop",
     "Marker2D",
+    "Mesh",
     "Node",
     "Node2D",
     "Node3D",
@@ -285,16 +323,23 @@ const SELECTED_CLASSES: &[&str] = &[
     "PackedScene",
     "PathFollow2D",
     "PhysicsBody2D",
+    "PrimitiveMesh",
     "RefCounted",
+    "RenderingServer",
     "Resource",
+    "ResourceFormatLoader",
     "ResourceLoader",
     "RigidBody2D",
     "SceneTree",
     "Sprite2D",
     "SpriteFrames",
+    "TextServer",
+    "TextServerExtension",
     "Texture",
     "Texture2DArray",
     "TextureLayered",
     "Time",
     "Timer",
+    "Window",
+    "Viewport",
 ];

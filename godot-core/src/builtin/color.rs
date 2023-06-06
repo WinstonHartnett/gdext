@@ -15,14 +15,18 @@ use sys::{ffi_methods, GodotFfi};
 /// Channel values are _typically_ in the range of 0 to 1, but this is not a requirement, and
 /// values outside this range are explicitly allowed for e.g. High Dynamic Range (HDR).
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color {
     /// The color's red component.
     pub r: f32,
+
     /// The color's green component.
     pub g: f32,
+
     /// The color's blue component.
     pub b: f32,
+
     /// The color's alpha component. A value of 0 means that the color is fully transparent. A
     /// value of 1 means that the color is fully opaque.
     pub a: f32,
@@ -311,16 +315,20 @@ impl Color {
     }
 }
 
-impl GodotFfi for Color {
+// SAFETY:
+// This type is represented as `Self` in Godot, so `*mut Self` is sound.
+unsafe impl GodotFfi for Color {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ColorChannelOrder {
     /// RGBA channel order. Godot's default.
     Rgba,
+
     /// ABGR channel order. Reverse of the default RGBA order.
     Abgr,
+
     /// ARGB channel order. More compatible with DirectX.
     Argb,
 }
@@ -494,4 +502,30 @@ fn to_be_words(mut u: u64) -> [u16; 4] {
     u >>= 16;
     let x = (u & 0xffff) as u16;
     [x, y, z, w]
+}
+
+impl std::fmt::Display for Color {
+    /// Formats `Color` to match Godot's string representation.
+    ///
+    /// Example:
+    /// ```
+    /// use godot::prelude::*;
+    /// let color = Color::from_rgba(1.0,1.0,1.0,1.0);
+    /// assert_eq!(format!("{}", color), "(1, 1, 1, 1)");
+    /// ```
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {}, {}, {})", self.r, self.g, self.b, self.a)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let color = super::Color::WHITE;
+        let expected_json = "{\"r\":1.0,\"g\":1.0,\"b\":1.0,\"a\":1.0}";
+
+        crate::builtin::test_utils::roundtrip(&color, expected_json);
+    }
 }

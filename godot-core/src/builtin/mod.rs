@@ -35,18 +35,22 @@
 // Re-export macros.
 pub use crate::{array, dict, varray};
 
+pub use aabb::*;
 pub use array_inner::{Array, VariantArray};
 pub use basis::*;
+pub use callable::*;
 pub use color::*;
 pub use dictionary_inner::Dictionary;
 pub use math::*;
-pub use node_path::*;
 pub use others::*;
 pub use packed_array::*;
+pub use plane::*;
 pub use projection::*;
 pub use quaternion::*;
+pub use rect2::*;
+pub use rect2i::*;
+pub use rid::*;
 pub use string::*;
-pub use string_name::*;
 pub use transform2d::*;
 pub use transform3d::*;
 pub use variant::*;
@@ -83,18 +87,21 @@ mod array_inner;
 #[path = "dictionary.rs"]
 mod dictionary_inner;
 
+mod aabb;
 mod basis;
+mod callable;
 mod color;
 mod glam_helpers;
 mod math;
-mod node_path;
 mod others;
 mod packed_array;
+mod plane;
 mod projection;
 mod quaternion;
+mod rect2;
+mod rect2i;
+mod rid;
 mod string;
-mod string_chars;
-mod string_name;
 mod transform2d;
 mod transform3d;
 mod variant;
@@ -133,36 +140,36 @@ pub(crate) fn u8_to_bool(u: u8) -> bool {
 /// Clippy often complains if you do `f as f64` when `f` is already an `f64`. This trait exists to make it easy to
 /// convert between the different reals and floats without a lot of allowing clippy lints for your code.
 pub trait RealConv {
-    /// Cast this [`real`] to an [`f32`] using `as`.
+    /// Cast this [`real`][type@real] to an [`f32`] using `as`.
     // Clippy complains that this is an `as_*` function but it takes a `self`
     // however, since this uses `as` internally it makes much more sense for
     // it to be named `as_f32` rather than `to_f32`.
     #[allow(clippy::wrong_self_convention)]
     fn as_f32(self) -> f32;
 
-    /// Cast this [`real`] to an [`f64`] using `as`.
+    /// Cast this [`real`][type@real] to an [`f64`] using `as`.
     // Clippy complains that this is an `as_*` function but it takes a `self`
     // however, since this uses `as` internally it makes much more sense for
     // it to be named `as_f64` rather than `to_f64`.
     #[allow(clippy::wrong_self_convention)]
     fn as_f64(self) -> f64;
 
-    /// Cast an [`f32`] to a [`real`] using `as`.
+    /// Cast an [`f32`] to a [`real`][type@real] using `as`.
     fn from_f32(f: f32) -> Self;
 
-    /// Cast an [`f64`] to a [`real`] using `as`.
+    /// Cast an [`f64`] to a [`real`][type@real] using `as`.
     fn from_f64(f: f64) -> Self;
 }
 
 #[cfg(not(feature = "double-precision"))]
 mod real_mod {
-    //! Definitions for single-precision `real`.
-
     /// Floating point type used for many structs and functions in Godot.
     ///
+    /// This type is `f32` by default, and `f64` when the Cargo feature `double-precision` is enabled.
+    ///
     /// This is not the `float` type in GDScript; that type is always 64-bits. Rather, many structs in Godot may use
-    /// either 32-bit or 64-bit floats such as [`Vector2`](super::Vector2). To convert between [`real`] and [`f32`] or
-    /// [`f64`] see [`RealConv`](super::RealConv).
+    /// either 32-bit or 64-bit floats, for example [`Vector2`](super::Vector2). To convert between [`real`] and [`f32`] or
+    /// [`f64`], see [`RealConv`](super::RealConv).
     ///
     /// See also the [Godot docs on float](https://docs.godotengine.org/en/stable/classes/class_float.html).
     ///
@@ -202,7 +209,7 @@ mod real_mod {
     /// A 4-dimensional vector from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RVec4 = glam::Vec4;
 
-    /// A 2x2 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].  
+    /// A 2x2 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RMat2 = glam::Mat2;
     /// A 3x3 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RMat3 = glam::Mat3;
@@ -223,13 +230,13 @@ mod real_mod {
 
 #[cfg(feature = "double-precision")]
 mod real_mod {
-    //! Definitions for double-precision `real`.
-
     /// Floating point type used for many structs and functions in Godot.
     ///
+    /// This type is `f32` by default, and `f64` when the Cargo feature `double-precision` is enabled.
+    ///
     /// This is not the `float` type in GDScript; that type is always 64-bits. Rather, many structs in Godot may use
-    /// either 32-bit or 64-bit floats such as [`Vector2`](super::Vector2). To convert between [`real`] and [`f32`] or
-    /// [`f64`] see [`RealConv`](super::RealConv).
+    /// either 32-bit or 64-bit floats, for example [`Vector2`](super::Vector2). To convert between [`real`] and [`f32`] or
+    /// [`f64`], see [`RealConv`](super::RealConv).
     ///
     /// See also the [Godot docs on float](https://docs.godotengine.org/en/stable/classes/class_float.html).
     ///
@@ -269,7 +276,7 @@ mod real_mod {
     /// A 4-dimensional vector from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RVec4 = glam::DVec4;
 
-    /// A 2x2 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].  
+    /// A 2x2 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RMat2 = glam::DMat2;
     /// A 3x3 column-major matrix from [`glam`]. Using a floating-point format compatible with [`real`].
     pub type RMat3 = glam::DMat3;
@@ -291,6 +298,8 @@ mod real_mod {
 pub use crate::real;
 pub(crate) use real_mod::*;
 pub use real_mod::{consts as real_consts, real};
+
+pub(crate) use glam::{IVec2, IVec3, IVec4};
 
 /// A macro to coerce float-literals into the real type. Mainly used where
 /// you'd normally use a suffix to specity the type, such as `115.0f32`.
@@ -315,4 +324,37 @@ macro_rules! real {
         let f: $crate::builtin::real = $f;
         f
     }};
+}
+
+/// The side of a [`Rect2`] or [`Rect2i`].
+///
+/// _Godot equivalent: `@GlobalScope.Side`_
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub enum RectSide {
+    Left = 0,
+    Top = 1,
+    Right = 2,
+    Bottom = 3,
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "serde"))]
+pub(crate) mod test_utils {
+    use serde::{Deserialize, Serialize};
+
+    pub(crate) fn roundtrip<T>(value: &T, expected_json: &str)
+    where
+        T: for<'a> Deserialize<'a> + Serialize + PartialEq + std::fmt::Debug,
+    {
+        let json: String = serde_json::to_string(value).unwrap();
+        let back: T = serde_json::from_str(json.as_str()).unwrap();
+
+        assert_eq!(back, *value, "serde round-trip changes value");
+        assert_eq!(
+            json, expected_json,
+            "value does not conform to expected JSON"
+        );
+    }
 }
