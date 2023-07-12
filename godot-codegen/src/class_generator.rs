@@ -1129,20 +1129,29 @@ fn make_method_definition(
 
     let class_name_str = &class_name.godot_ty;
     let init_code = quote! {
-        let __class_name = StringName::from(#class_name_str);
-        let __method_name = StringName::from(#method_name_str);
-        let __method_bind = sys::interface_fn!(classdb_get_method_bind)(
-            __class_name.string_sys(),
-            __method_name.string_sys(),
-            #hash
-        );
-        assert!(
-            !__method_bind.is_null(),
-            "failed to load method {}::{} (hash {}) -- possible Godot/gdext version mismatch",
-            #class_name_str,
-            #method_name_str,
-            #hash
-        );
+        struct __Wrapper(godot_ffi::GDExtensionMethodBindPtr);
+        unsafe impl Send for __Wrapper {}
+        unsafe impl Sync for __Wrapper {}
+        static __METHOD_BIND: std::sync::OnceLock<__Wrapper> = std::sync::OnceLock::new();
+
+        let __method_bind = __METHOD_BIND
+            .get_or_init(|| {
+                let __class_name = StringName::from(#class_name_str);
+                let __method_name = StringName::from(#method_name_str);
+                let __method_bind = sys::interface_fn!(classdb_get_method_bind)(
+                    __class_name.string_sys(),
+                    __method_name.string_sys(),
+                    #hash
+                );
+                assert!(
+                    !__method_bind.is_null(),
+                    "failed to load method {}::{} (hash {}) -- possible Godot/gdext version mismatch",
+                    #class_name_str,
+                    #method_name_str,
+                    #hash
+                );
+                __Wrapper(__method_bind)
+            }).0;
         let __call_fn = sys::interface_fn!(#function_provider);
     };
 
@@ -1193,14 +1202,25 @@ fn make_builtin_method_definition(
 
     let variant_type = &type_info.type_names.sys_variant_type;
     let init_code = quote! {
-        let __variant_type = sys::#variant_type;
-        let __method_name = StringName::from(#method_name_str);
-        let __call_fn = sys::interface_fn!(variant_get_ptr_builtin_method)(
-            __variant_type,
-            __method_name.string_sys(),
-            #hash
-        );
-        let __call_fn = __call_fn.unwrap_unchecked();
+        struct __Wrapper(godot_ffi::GDExtensionPtrBuiltInMethod);
+        unsafe impl Send for __Wrapper {}
+        unsafe impl Sync for __Wrapper {}
+        static __CALL_FN: std::sync::OnceLock<__Wrapper> = std::sync::OnceLock::new();
+
+        let __call_fn = __CALL_FN
+            .get_or_init(|| {
+                let __variant_type = sys::#variant_type;
+                let __method_name = StringName::from(#method_name_str);
+                __Wrapper(
+                    sys::interface_fn!(variant_get_ptr_builtin_method)(
+                        __variant_type,
+                        __method_name.string_sys(),
+                        #hash
+                    )
+                )
+            })
+            .0
+            .unwrap_unchecked();
     };
 
     let receiver = make_receiver(method.is_static, method.is_const, quote! { self.sys_ptr });
@@ -1248,9 +1268,23 @@ pub(crate) fn make_utility_function_definition(
     let hash = function.hash;
     let variant_ffi = function.is_vararg.then_some(VariantFfi::type_ptr());
     let init_code = quote! {
-        let __function_name = StringName::from(#function_name_str);
-        let __call_fn = sys::interface_fn!(variant_get_ptr_utility_function)(__function_name.string_sys(), #hash);
-        let __call_fn = __call_fn.unwrap_unchecked();
+        struct __Wrapper(godot_ffi::GDExtensionPtrUtilityFunction);
+        unsafe impl Send for __Wrapper {}
+        unsafe impl Sync for __Wrapper {}
+        static __CALL_FN: std::sync::OnceLock<__Wrapper> = std::sync::OnceLock::new();
+
+        let __call_fn = __CALL_FN
+            .get_or_init(|| {
+                let __function_name = StringName::from(#function_name_str);
+                __Wrapper(
+                    sys::interface_fn!(variant_get_ptr_utility_function)(
+                        __function_name.string_sys(),
+                        #hash
+                    )
+                )
+            })
+            .0
+            .unwrap_unchecked();
     };
     let invocation = quote! {
         __call_fn(return_ptr, __args_ptr, __args.len() as i32);
