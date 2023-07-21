@@ -296,6 +296,7 @@ struct GeneratedBuiltinModule {
 #[cfg(not(feature = "codegen-full"))]
 const SELECTED_CLASSES: &[&str] = &[
     "AnimatedSprite2D",
+    "ArrayMesh",
     "Area2D",
     "AudioStreamPlayer",
     "BaseButton",
@@ -305,6 +306,7 @@ const SELECTED_CLASSES: &[&str] = &[
     "Camera3D",
     "CanvasItem",
     "CanvasLayer",
+    "ClassDB",
     "CollisionObject2D",
     "CollisionShape2D",
     "Control",

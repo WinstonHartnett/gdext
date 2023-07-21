@@ -562,7 +562,7 @@ fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> Generate
                 #methods
                 #constants
             }
-            impl crate::obj::GodotClass for #class_name {
+            unsafe impl crate::obj::GodotClass for #class_name {
                 type Base = #base_ty;
                 type Declarer = crate::obj::dom::EngineDomain;
                 type Mem = crate::obj::mem::#memory;
@@ -659,7 +659,7 @@ fn make_notification_enum(
     all_bases: &Vec<TyName>,
     ctx: &mut Context,
 ) -> (Option<TokenStream>, Ident) {
-    let Some(all_constants) = ctx.notification_constants(class_name) else  {
+    let Some(all_constants) = ctx.notification_constants(class_name) else {
         // Class has no notification constants: reuse (direct/indirect) base enum
         return (None, ctx.notification_enum_name(class_name));
     };
@@ -1821,7 +1821,6 @@ fn make_params_and_args(method_args: &[&FnParam]) -> (Vec<TokenStream>, Vec<Toke
             (quote! { #param_name: #param_ty }, quote! { #param_name })
         })
         .unzip()
-    // .unzip::<(Vec<_>, Vec<_>)>()
 }
 
 fn make_return_and_impl(
@@ -1831,59 +1830,44 @@ fn make_return_and_impl(
     error_fn_context: TokenStream, // only for panic message
     is_virtual: bool,
 ) -> TokenStream {
-    let FnReturn {
-        type_: return_ty, ..
-    } = return_value;
+    let return_ty = &return_value.type_;
 
-    let FnCode {
-        varcall_invocation,
-        ptrcall_invocation,
-        variant_ffi,
-        ..
-    } = code;
+    // Virtual methods
+    if is_virtual {
+        return quote! { unimplemented!() };
+    }
 
-    match (is_virtual, variant_ffi, return_ty) {
-        (true, _, _) => {
-            quote! {
-                unimplemented!()
-            }
-        }
-        (false, Some(variant_ffi), Some(return_ty)) => {
-            // If the return type is not Variant, then convert to concrete target type
-            let return_expr = match return_ty {
-                RustTy::BuiltinIdent(ident) if ident == "Variant" => quote! { variant },
-                _ => quote! { variant.to() },
-            };
-            let from_sys_init_method = &variant_ffi.from_sys_init_method;
+    // Varcall
+    if let Some(variant_ffi) = &code.variant_ffi {
+        // If the return type is not Variant, then convert to concrete target type
+        let return_expr = match return_ty {
+            None => TokenStream::new(), // unit return
+            Some(RustTy::BuiltinIdent(ident)) if ident == "Variant" => quote! { __variant },
+            Some(_) => quote! { __variant.to() },
+        };
+        let from_sys_init_method = &variant_ffi.from_sys_init_method;
+        let varcall_invocation = &code.varcall_invocation;
 
-            // Note: __err may remain unused if the #call does not handle errors (e.g. utility fn, ptrcall, ...)
-            // TODO use Result instead of panic on error
-            quote! {
-                let variant = Variant::#from_sys_init_method(|return_ptr| {
-                    let mut __err = sys::default_call_error();
-                    #varcall_invocation
-                    if __err.error != sys::GDEXTENSION_CALL_OK {
-                        #prepare_arg_types
-                        sys::panic_call_error(&__err, #error_fn_context, &__arg_types);
-                    }
-                });
-                #return_expr
-            }
-        }
-        (false, Some(_), None) => {
-            // Note: __err may remain unused if the #call does not handle errors (e.g. utility fn, ptrcall, ...)
-            // TODO use Result instead of panic on error
-            quote! {
+        // Note: __err may remain unused if the #call does not handle errors (e.g. utility fn, ptrcall, ...).
+        //       __variant remains unused if the function returns unit.
+        // TODO use Result instead of panic on error
+        return quote! {
+            let __variant = Variant::#from_sys_init_method(|return_ptr| {
                 let mut __err = sys::default_call_error();
-                let return_ptr = std::ptr::null_mut();
                 #varcall_invocation
                 if __err.error != sys::GDEXTENSION_CALL_OK {
                     #prepare_arg_types
                     sys::panic_call_error(&__err, #error_fn_context, &__arg_types);
                 }
-            }
-        }
-        (false, None, Some(RustTy::EngineClass { tokens, .. })) => {
+            });
+            #return_expr
+        };
+    }
+
+    // Ptrcall
+    let ptrcall_invocation = &code.ptrcall_invocation;
+    match return_ty {
+        Some(RustTy::EngineClass { tokens, .. }) => {
             let return_ty = tokens;
             quote! {
                 <#return_ty>::from_sys_init_opt(|return_ptr| {
@@ -1891,7 +1875,7 @@ fn make_return_and_impl(
                 })
             }
         }
-        (false, None, Some(return_ty)) => {
+        Some(return_ty) => {
             quote! {
                 let via = <<#return_ty as sys::GodotFuncMarshal>::Via as sys::GodotFfi>::from_sys_init_default(|return_ptr| {
                     #ptrcall_invocation
@@ -1899,7 +1883,7 @@ fn make_return_and_impl(
                 <#return_ty as sys::GodotFuncMarshal>::try_from_via(via).unwrap()
             }
         }
-        (false, None, None) => {
+        None => {
             quote! {
                 let return_ptr = std::ptr::null_mut();
                 #ptrcall_invocation

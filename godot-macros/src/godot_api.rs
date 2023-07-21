@@ -4,13 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::method_registration::gdext_register_method;
 use crate::method_registration::gdext_virtual_method_callback;
+use crate::method_registration::make_method_registration;
 use crate::util;
 use crate::util::bail;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
-use venial::{AttributeValue, Declaration, Error, FnParam, Function, Impl, ImplMember, TyExpr};
+use quote::spanned::Spanned;
+use venial::{
+    Attribute, AttributeValue, Constant, Declaration, Error, FnParam, Function, Impl, ImplMember,
+    TyExpr,
+};
 
 pub fn transform(input_decl: Declaration) -> Result<TokenStream, Error> {
     let decl = match input_decl {
@@ -45,6 +49,7 @@ pub fn transform(input_decl: Declaration) -> Result<TokenStream, Error> {
 enum BoundAttrType {
     Func(AttributeValue),
     Signal(AttributeValue),
+    Const(AttributeValue),
 }
 
 struct BoundAttr {
@@ -72,32 +77,77 @@ fn transform_inherent_impl(mut decl: Impl) -> Result<TokenStream, Error> {
 
     for signature in signals {
         let mut param_types: Vec<TyExpr> = Vec::new();
-        let mut param_names: Vec<Ident> = Vec::new();
+        let mut param_names: Vec<String> = Vec::new();
 
         for param in signature.params.inner {
             match &param.0 {
                 FnParam::Typed(param) => {
                     param_types.push(param.ty.clone());
-                    param_names.push(param.name.clone());
+                    param_names.push(param.name.to_string());
                 }
                 FnParam::Receiver(_) => {}
             };
         }
 
+        let signature_tuple = util::make_signature_tuple_type(&quote! { () }, &param_types);
+        let indexes = 0..param_types.len();
+        let param_array_decl = quote! {
+            [
+                // Don't use raw sys pointers directly, very easy to have objects going out of scope.
+                #(
+                    <#signature_tuple as godot::builtin::meta::VarcallSignatureTuple>
+                        ::param_property_info(#indexes, #param_names),
+                )*
+            ]
+        };
+
         signal_name_strs.push(signature.name.to_string());
         signal_parameters_count.push(param_names.len());
-        signal_parameters.push(
-            quote! {
-                ::godot::private::gdext_get_arguments_info!(((), #(#param_types ),*), #(#param_names, )*)
-            },
-        );
+        signal_parameters.push(param_array_decl);
     }
 
     let prv = quote! { ::godot::private };
 
     let methods_registration = funcs
-        .iter()
-        .map(|func| gdext_register_method(&class_name, &quote! { #func }));
+        .into_iter()
+        .map(|func| make_method_registration(&class_name, func));
+
+    let consts = process_godot_constants(&mut decl)?;
+    let mut integer_constant_names = Vec::new();
+    let mut integer_constant_values = Vec::new();
+
+    for constant in consts.iter() {
+        if constant.initializer.is_none() {
+            return bail!(constant, "exported const should have initializer");
+        };
+
+        let name = &constant.name;
+
+        integer_constant_names.push(constant.name.to_string());
+        integer_constant_values.push(quote! { #class_name::#name });
+    }
+
+    let register_constants = if !integer_constant_names.is_empty() {
+        quote! {
+            use ::godot::builtin::meta::registration::constant::*;
+            use ::godot::builtin::meta::ClassName;
+            use ::godot::builtin::StringName;
+
+            #(
+                ExportConstant::new(
+                    ClassName::of::<#class_name>(),
+                    ConstantKind::Integer(
+                        IntegerConstant::new(
+                            StringName::from(#integer_constant_names),
+                            #integer_constant_values
+                        )
+                    )
+                ).register();
+            )*
+        }
+    } else {
+        quote! {}
+    };
 
     let result = quote! {
         #decl
@@ -130,6 +180,10 @@ fn transform_inherent_impl(mut decl: Impl) -> Result<TokenStream, Error> {
                     )*
                 }
             }
+
+            fn __register_constants() {
+                #register_constants
+        }
         }
 
         impl ::godot::private::Cannot_export_without_godot_api_impl for #class_name {}
@@ -159,7 +213,7 @@ fn process_godot_fns(decl: &mut Impl) -> Result<(Vec<Function>, Vec<Function>), 
             continue;
         };
 
-        if let Some(attr) = extract_attributes(method)? {
+        if let Some(attr) = extract_attributes(&method, &method.attributes)? {
             // Remaining code no longer has attribute -- rest stays
             method.attributes.remove(attr.index);
 
@@ -192,6 +246,12 @@ fn process_godot_fns(decl: &mut Impl) -> Result<(Vec<Function>, Vec<Function>), 
                     signal_signatures.push(sig.clone());
                     removed_indexes.push(index);
                 }
+                BoundAttrType::Const(_) => {
+                    return attr.bail(
+                        "#[constant] can only be used on associated cosntant",
+                        method,
+                    )
+                }
             }
         }
     }
@@ -205,38 +265,80 @@ fn process_godot_fns(decl: &mut Impl) -> Result<(Vec<Function>, Vec<Function>), 
     Ok((func_signatures, signal_signatures))
 }
 
-fn extract_attributes(method: &Function) -> Result<Option<BoundAttr>, Error> {
+fn process_godot_constants(decl: &mut Impl) -> Result<Vec<Constant>, Error> {
+    let mut constant_signatures = vec![];
+
+    for item in decl.body_items.iter_mut() {
+        let ImplMember::Constant(constant) = item else {
+            continue;
+        };
+
+        if let Some(attr) = extract_attributes(&constant, &constant.attributes)? {
+            // Remaining code no longer has attribute -- rest stays
+            constant.attributes.remove(attr.index);
+
+            match attr.ty {
+                BoundAttrType::Func(_) => {
+                    return bail!(constant, "#[func] can only be used on functions")
+                }
+                BoundAttrType::Signal(_) => {
+                    return bail!(constant, "#[signal] can only be used on functions")
+                }
+                BoundAttrType::Const(_) => {
+                    if constant.initializer.is_none() {
+                        return bail!(constant, "exported constant must have initializer");
+                    }
+                    constant_signatures.push(constant.clone());
+                }
+            }
+        }
+    }
+
+    Ok(constant_signatures)
+}
+
+fn extract_attributes<T>(
+    error_scope: T,
+    attributes: &[Attribute],
+) -> Result<Option<BoundAttr>, Error>
+where
+    for<'a> &'a T: Spanned,
+{
     let mut found = None;
-    for (index, attr) in method.attributes.iter().enumerate() {
+    for (index, attr) in attributes.iter().enumerate() {
         let attr_name = attr
             .get_single_path_segment()
             .expect("get_single_path_segment");
 
-        // Note: can't use match without constructing new string, because ident
-        let new_found = if attr_name == "func" {
-            Some(BoundAttr {
+        let new_found = match attr_name {
+            name if name == "func" => Some(BoundAttr {
                 attr_name: attr_name.clone(),
                 index,
                 ty: BoundAttrType::Func(attr.value.clone()),
-            })
-        } else if attr_name == "signal" {
-            // TODO once parameters are supported, this should probably be moved to the struct definition
-            // E.g. a zero-sized type Signal<(i32, String)> with a provided emit(i32, String) method
-            // This could even be made public (callable on the struct obj itself)
-            Some(BoundAttr {
+            }),
+            name if name == "signal" => {
+                // TODO once parameters are supported, this should probably be moved to the struct definition
+                // E.g. a zero-sized type Signal<(i32, String)> with a provided emit(i32, String) method
+                // This could even be made public (callable on the struct obj itself)
+                Some(BoundAttr {
+                    attr_name: attr_name.clone(),
+                    index,
+                    ty: BoundAttrType::Signal(attr.value.clone()),
+                })
+            }
+            name if name == "constant" => Some(BoundAttr {
                 attr_name: attr_name.clone(),
                 index,
-                ty: BoundAttrType::Signal(attr.value.clone()),
-            })
-        } else {
-            None
+                ty: BoundAttrType::Const(attr.value.clone()),
+            }),
+            _ => None,
         };
 
         // Validate at most 1 attribute
         if found.is_some() && new_found.is_some() {
             bail!(
-                &method.name,
-                "at most one #[func] or #[signal] attribute per method allowed",
+                &error_scope,
+                "at most one #[func], #[signal], or #[constant] attribute per declaration allowed",
             )?;
         }
 

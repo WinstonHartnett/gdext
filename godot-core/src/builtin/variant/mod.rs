@@ -207,7 +207,7 @@ impl Variant {
     /// # Safety
     ///
     /// See [`GodotFfi::from_sys_init`] and [`GodotFfi::from_sys_init_default`].
-    #[cfg(gdextension_api = "4.0")]
+    #[cfg(before_api = "4.1")]
     pub unsafe fn from_var_sys_init_or_init_default(
         init_fn: impl FnOnce(sys::GDExtensionVariantPtr),
     ) -> Self {
@@ -217,7 +217,7 @@ impl Variant {
     /// # Safety
     ///
     /// See [`GodotFfi::from_sys_init`] and [`GodotFfi::from_sys_init_default`].
-    #[cfg(not(gdextension_api = "4.0"))]
+    #[cfg(since_api = "4.1")]
     pub unsafe fn from_var_sys_init_or_init_default(
         init_fn: impl FnOnce(sys::GDExtensionUninitializedVariantPtr),
     ) -> Self {
@@ -281,6 +281,7 @@ impl Default for Variant {
     }
 }
 
+// Variant is not Eq because it can contain floats and other types composed of floats.
 impl PartialEq for Variant {
     fn eq(&self, other: &Self) -> bool {
         Self::evaluate(self, other, VariantOperator::Equal)
@@ -288,13 +289,6 @@ impl PartialEq for Variant {
             .unwrap_or(false) // if there is no defined conversion, then they are non-equal
     }
 }
-
-// impl Eq for Variant {}
-// impl PartialEq for Variant {
-//     fn eq(&self, other: &Self) -> bool {
-//         unsafe { builtin_fn!(ope) }
-//     }
-// }
 
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -305,8 +299,8 @@ impl fmt::Display for Variant {
 
 impl fmt::Debug for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO include variant type name
-        let s = self.stringify();
-        write!(f, "Variant({s})")
+        let ty = self.get_type();
+        let val = self.stringify();
+        write!(f, "Variant(ty={ty:?}, val={val})")
     }
 }

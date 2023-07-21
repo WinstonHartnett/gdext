@@ -12,7 +12,7 @@ use venial::{Declaration, NamedField, Struct, StructFields, TyExpr};
 
 use self::property::field_export::FieldExport;
 use self::property::field_var::FieldVar;
-use self::property::make_property_impl;
+use self::property::{make_property_impl, FieldHint};
 
 mod property;
 
@@ -44,7 +44,7 @@ pub fn transform(decl: Declaration) -> ParseResult<TokenStream> {
     };
 
     Ok(quote! {
-        impl ::godot::obj::GodotClass for #class_name {
+        unsafe impl ::godot::obj::GodotClass for #class_name {
             type Base = ::godot::engine::#base_ty;
             type Declarer = ::godot::obj::dom::UserDomain;
             type Mem = <Self::Base as ::godot::obj::GodotClass>::Mem;

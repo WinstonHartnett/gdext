@@ -18,9 +18,8 @@ use sys::{
 
 use crate::builtin::meta::{ClassName, VariantMetadata};
 use crate::builtin::{
-    Callable, FromVariant, GodotString, StringName, ToVariant, Variant, VariantConversionError,
+    Callable, FromVariant, StringName, ToVariant, Variant, VariantConversionError,
 };
-use crate::engine::{Node, Object, Resource};
 use crate::obj::dom::Domain as _;
 use crate::obj::mem::Memory as _;
 use crate::obj::{cap, dom, mem, EngineEnum, GodotClass, Inherits, Share};
@@ -338,15 +337,14 @@ impl<T: GodotClass> Gd<T> {
         })
     }
 
-    // Temporary workaround for bug in Godot that makes casts always succeed.
-    // (See https://github.com/godot-rust/gdext/issues/158)
-    // TODO(#234) remove this code once the bug is fixed upstream.
+    // See use-site for explanation.
     fn is_cast_valid<U>(&self) -> bool
     where
         U: GodotClass,
     {
-        let as_obj = unsafe { self.ffi_cast::<Object>() }.expect("Everything inherits object");
-        let cast_is_valid = as_obj.is_class(GodotString::from(U::CLASS_NAME));
+        let as_obj =
+            unsafe { self.ffi_cast::<engine::Object>() }.expect("Everything inherits object");
+        let cast_is_valid = as_obj.is_class(crate::builtin::GodotString::from(U::CLASS_NAME));
         std::mem::forget(as_obj);
         cast_is_valid
     }
@@ -356,9 +354,8 @@ impl<T: GodotClass> Gd<T> {
     where
         U: GodotClass,
     {
-        // Temporary workaround for bug in Godot that makes casts always
-        // succeed. (See https://github.com/godot-rust/gdext/issues/158)
-        // TODO(#234) remove this check once the bug is fixed upstream.
+        // Workaround for bug in Godot 4.0 that makes casts always succeed (https://github.com/godot-rust/gdext/issues/158).
+        // TODO once fixed in Godot, use #[cfg(before_api = "4.1")]
         if !self.is_cast_valid::<U>() {
             return Err(self);
         }
@@ -483,9 +480,9 @@ where
         // Runtime check in case of T=Object, no-op otherwise
         let ref_counted = T::Mem::is_ref_counted(&self);
         assert_ne!(
-			ref_counted, Some(true),
-			"called free() on Gd<Object> which points to a RefCounted dynamic type; free() only supported for manually managed types."
-		);
+            ref_counted, Some(true),
+            "called free() on Gd<Object> which points to a RefCounted dynamic type; free() only supported for manually managed types."
+        );
 
         // If ref_counted returned None, that means the instance was destroyed
         assert!(
@@ -564,7 +561,7 @@ where
             // ptr is `Ref<T>*`
             // See the docs for `PtrcallType::Virtual` for more info on `Ref<T>`.
             interface_fn!(ref_get_object)(ptr as sys::GDExtensionRefPtr)
-        } else if !cfg!(gdextension_api = "4.0") || matches!(call_type, PtrcallType::Virtual) {
+        } else if cfg!(since_api = "4.1") || matches!(call_type, PtrcallType::Virtual) {
             // ptr is `T**`
             *(ptr as *mut sys::GDExtensionObjectPtr)
         } else {
@@ -597,9 +594,13 @@ where
         // can't perform virtual method calls currently, so they are always `T*`.
         //
         // In 4.1 argument pointers were standardized to always be `T**`.
-        if cfg!(gdextension_api = "4.0") {
+        #[cfg(before_api = "4.1")]
+        {
             self.sys_const()
-        } else {
+        }
+
+        #[cfg(since_api = "4.1")]
+        {
             std::ptr::addr_of!(self.opaque) as sys::GDExtensionConstTypePtr
         }
     }
@@ -731,9 +732,9 @@ impl<T: GodotClass> Property for Gd<T> {
 
 impl<T: GodotClass> Export for Gd<T> {
     fn default_export_info() -> ExportInfo {
-        let hint = if T::inherits::<Resource>() {
+        let hint = if T::inherits::<engine::Resource>() {
             engine::global::PropertyHint::PROPERTY_HINT_RESOURCE_TYPE
-        } else if T::inherits::<Node>() {
+        } else if T::inherits::<engine::Node>() {
             engine::global::PropertyHint::PROPERTY_HINT_NODE_TYPE
         } else {
             engine::global::PropertyHint::PROPERTY_HINT_NONE
@@ -759,7 +760,7 @@ impl<T: GodotClass> FromVariant for Gd<T> {
             // TODO(uninit) - see if we can use from_sys_init()
             use ::godot_ffi::AsUninit;
 
-            Gd::<Object>::from_sys_init_opt(|self_ptr| {
+            Gd::<engine::Object>::from_sys_init_opt(|self_ptr| {
                 let converter = sys::builtin_fn!(object_from_variant);
                 converter(self_ptr.as_uninit(), variant.var_sys());
             })
