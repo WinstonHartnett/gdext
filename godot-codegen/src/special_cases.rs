@@ -38,14 +38,15 @@ pub(crate) fn is_deleted(class_name: &TyName, godot_method_name: &str) -> bool {
 
 #[rustfmt::skip]
 pub(crate) fn is_class_deleted(class_name: &TyName) -> bool {
-    match class_name.godot_ty.as_str() {
-        // Thread APIs
-        | "Thread"
-        | "Mutex"
-        | "Semaphore"
+    // match class_name.godot_ty.as_str() {
+    //     // Thread APIs
+    //     | "Thread"
+    //     | "Mutex"
+    //     | "Semaphore"
 
-        => true, _ => false
-    }
+    //     => true, _ => false
+    // }
+    false
 }
 
 #[rustfmt::skip]
