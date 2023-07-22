@@ -35,7 +35,7 @@ mod single_thread {
 
     /// Manages storage and lifecycle of user's extension class instances.
     pub struct InstanceStorage<T: GodotClass> {
-        user_instance: cell::RefCell<T>,
+        user_instance: T,
 
         // Declared after `user_instance`, is dropped last
         pub lifecycle: Lifecycle,
@@ -48,7 +48,7 @@ mod single_thread {
             out!("    Storage::construct             <{}>", type_name::<T>());
 
             Self {
-                user_instance: cell::RefCell::new(user_instance),
+                user_instance,
                 lifecycle: Lifecycle::Alive,
                 godot_ref_count: 1,
             }
@@ -87,26 +87,28 @@ mod single_thread {
                                        // TODO drop entire Storage
         }*/
 
-        pub fn get(&self) -> cell::Ref<T> {
-            self.user_instance.try_borrow().unwrap_or_else(|_e| {
-                panic!(
-                    "Gd<T>::bind() failed, already bound; T = {}.\n  \
-                     Make sure there is no &mut T live at the time.\n  \
-                     This often occurs when calling a GDScript function/signal from Rust, which then calls again Rust code.",
-                    type_name::<T>()
-                )
-            })
+        pub fn get(&self) -> &T {
+            &self.user_instance
+            // self.user_instance.try_borrow().unwrap_or_else(|_e| {
+            //     panic!(
+            //         "Gd<T>::bind() failed, already bound; T = {}.\n  \
+            //          Make sure there is no &mut T live at the time.\n  \
+            //          This often occurs when calling a GDScript function/signal from Rust, which then calls again Rust code.",
+            //         type_name::<T>()
+            //     )
+            // })
         }
 
-        pub fn get_mut(&mut self) -> cell::RefMut<T> {
-            self.user_instance.try_borrow_mut().unwrap_or_else(|_e| {
-                panic!(
-                    "Gd<T>::bind_mut() failed, already bound; T = {}.\n  \
-                     Make sure there is no &T or &mut T live at the time.\n  \
-                     This often occurs when calling a GDScript function/signal from Rust, which then calls again Rust code.",
-                    type_name::<T>()
-                )
-            })
+        pub fn get_mut(&mut self) -> &mut T {
+            &mut self.user_instance
+            // self.user_instance.try_borrow_mut().unwrap_or_else(|_e| {
+            //     panic!(
+            //         "Gd<T>::bind_mut() failed, already bound; T = {}.\n  \
+            //          Make sure there is no &T or &mut T live at the time.\n  \
+            //          This often occurs when calling a GDScript function/signal from Rust, which then calls again Rust code.",
+            //         type_name::<T>()
+            //     )
+            // })
         }
 
         pub(super) fn godot_ref_count(&self) -> u32 {

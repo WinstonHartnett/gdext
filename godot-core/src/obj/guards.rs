@@ -17,7 +17,7 @@ use std::sync;
 #[derive(Debug)]
 pub struct GdRef<'a, T> {
     #[cfg(not(feature = "threads"))]
-    cell_ref: cell::Ref<'a, T>,
+    cell_ref: &'a T,
 
     #[cfg(feature = "threads")]
     cell_ref: sync::RwLockReadGuard<'a, T>,
@@ -25,7 +25,7 @@ pub struct GdRef<'a, T> {
 
 impl<'a, T> GdRef<'a, T> {
     #[cfg(not(feature = "threads"))]
-    pub(crate) fn from_cell(cell_ref: cell::Ref<'a, T>) -> Self {
+    pub(crate) fn from_cell(cell_ref: &'a T) -> Self {
         Self { cell_ref }
     }
 
@@ -53,7 +53,7 @@ impl<T> Deref for GdRef<'_, T> {
 #[derive(Debug)]
 pub struct GdMut<'a, T> {
     #[cfg(not(feature = "threads"))]
-    cell_ref: cell::RefMut<'a, T>,
+    cell_ref: &'a mut T,
 
     #[cfg(feature = "threads")]
     cell_ref: sync::RwLockWriteGuard<'a, T>,
@@ -61,7 +61,7 @@ pub struct GdMut<'a, T> {
 
 impl<'a, T> GdMut<'a, T> {
     #[cfg(not(feature = "threads"))]
-    pub(crate) fn from_cell(cell_ref: cell::RefMut<'a, T>) -> Self {
+    pub(crate) fn from_cell(cell_ref: &'a mut T) -> Self {
         Self { cell_ref }
     }
 
@@ -75,12 +75,12 @@ impl<T> Deref for GdMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        self.cell_ref.deref()
+        self.cell_ref
     }
 }
 
 impl<T> DerefMut for GdMut<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.cell_ref.deref_mut()
+        self.cell_ref
     }
 }
